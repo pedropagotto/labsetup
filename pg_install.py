@@ -6,6 +6,7 @@ Uso: sudo python pg_install.py --help
 """
 
 import argparse
+import getpass
 import os
 import platform
 import secrets
@@ -185,9 +186,14 @@ def main():
     )
     parser.add_argument("--user", default=None, help="Nome do usuário (padrão: postgres_app)")
     parser.add_argument("--database", default=None, help="Nome do banco (padrão: app_db)")
-    parser.add_argument("--password", default=None, help="Senha (será gerada se não informada)")
+    parser.add_argument("--password", default=None, help="Senha (será solicitada interativamente se omitida; gerada aleatória se vazia)")
     parser.add_argument("--skip-install", action="store_true", help="Pula a instalação (assume já instalado)")
     args = parser.parse_args()
+
+    # Solicita senha interativamente se não informada via CLI (senha não ecoa no terminal)
+    if not args.password:
+        senha = getpass.getpass("Senha para o usuário PostgreSQL (deixe vazio para gerar aleatória): ").strip()
+        args.password = senha or None
 
     if os.geteuid() != 0 and not args.skip_install:
         print("[ERRO] Execute como root ou com sudo para instalar pacotes.")

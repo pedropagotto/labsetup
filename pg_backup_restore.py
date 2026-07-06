@@ -6,6 +6,7 @@ Uso: python pg_backup_restore.py --help
 """
 
 import argparse
+import getpass
 import os
 import subprocess
 import sys
@@ -45,6 +46,36 @@ def build_docker_cmd(container, pg_cmd, password=None):
     docker_cmd.append(container)
     docker_cmd.extend(pg_cmd)
     return docker_cmd
+
+
+def prompt_connection_details(prefix):
+    """Solicita interativamente os dados de conexão do servidor (host, porta, usuário, senha)."""
+    role = "Backup" if prefix == "source" else "Restore"
+    print(f"\n=== Servidor de {role} ===")
+    host = input("1- host: ").strip() or "localhost"
+    port_str = input("2- porta: ").strip() or "5432"
+    try:
+        port = int(port_str)
+    except ValueError:
+        port = 5432
+    user = input("3- usuario: ").strip() or "postgres"
+    password = getpass.getpass("4- senha: ")
+    return {
+        "host": host,
+        "port": port,
+        "user": user,
+        "password": password if password else None
+    }
+
+
+def prompt_backup_path():
+    """Solicita interativamente o path onde salvar o arquivo de backup."""
+    print("\n=== Arquivo de Backup ===")
+    path = input("Path para salvar o backup: ").strip()
+    if not path:
+        path = "/tmp/backup.dump"
+        print(f"[INFO] Usando path padrão: {path}")
+    return path
 
 
 def do_backup(args):
@@ -191,7 +222,7 @@ def main():
     p_backup.add_argument("--source-db", required=True)
     p_backup.add_argument("--source-user", default="postgres")
     p_backup.add_argument("--source-password", default=None, help="Senha (ou use $PGPASSWORD)")
-    p_backup.add_argument("--backup-file", required=True)
+    p_backup.add_argument("--backup-file", required=False, help="Path do arquivo de backup (será solicitado se omitido)")
     p_backup.add_argument("--format", choices=["plain", "custom"], default="custom")
     p_backup.set_defaults(func=do_backup)
 
@@ -204,7 +235,7 @@ def main():
     p_restore.add_argument("--target-db", required=True)
     p_restore.add_argument("--target-user", default="postgres")
     p_restore.add_argument("--target-password", default=None)
-    p_restore.add_argument("--backup-file", required=True)
+    p_restore.add_argument("--backup-file", required=True, help="Path do arquivo de backup para restore")
     p_restore.add_argument("--format", choices=["plain", "custom"], default="custom")
     p_restore.set_defaults(func=do_restore)
 
@@ -227,15 +258,29 @@ def main():
     p_br.add_argument("--target-password", default=None)
 
     p_br.add_argument("--format", choices=["plain", "custom"], default="custom")
+    p_br.add_argument("--backup-file", required=False, help="Path do arquivo de backup (será solicitado se omitido)")
     p_br.set_defaults(func=do_backup_restore)
 
     args = parser.parse_args()
 
-    # Normaliza argumentos em dicionários de conexão
+    # Sempre solicita interativamente os dados de conexão (host, porta, usuário, senha)
+    # para TODAS as operações de backup/restore, conforme solicitado.
     if args.command in ["backup", "backup-restore"]:
-        args.source = parse_connection_args("source", args)
+        interactive_source = prompt_connection_details("source")
+        # preserva type, db, container se fornecidos via CLI
+        base_source = parse_connection_args("source", args)
+        base_source.update(interactive_source)
+        args.source = base_source
     if args.command in ["restore", "backup-restore"]:
-        args.target = parse_connection_args("target", args)
+        interactive_target = prompt_connection_details("target")
+        base_target = parse_connection_args("target", args)
+        base_target.update(interactive_target)
+        args.target = base_target
+
+    # Para backup e backup-restore, solicita o path para salvar o backup (se não fornecido)
+    if args.command in ["backup", "backup-restore"]:
+        if not getattr(args, "backup_file", None):
+            args.backup_file = prompt_backup_path()
 
     # Validações básicas
     if args.command == "backup" and args.source_type == "docker" and not args.source_container:

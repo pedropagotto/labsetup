@@ -33,7 +33,7 @@ sudo python pg_install.py
 Opções:
 - `--user NOME` : nome do usuário (padrão: postgres_app)
 - `--database NOME` : nome do banco (padrão: app_db)
-- `--password SENHA` : senha customizada (será gerada aleatória se omitida)
+- `--password SENHA` : senha customizada (será solicitada interativamente se omitida; gerada aleatória se deixada vazia)
 - `--skip-install` : pula instalação (útil para configurar apenas usuário/banco)
 
 Ao final, o script:
@@ -48,9 +48,45 @@ Ao final, o script:
 - Acesso ao Docker daemon (se usar containers)
 - Conexão de rede aos servidores de banco (se remotos)
 
+## Instalação em Servidor Limpo
+Para instalar e usar a ferramenta `py-db-install` em um servidor limpo (recomendado Debian/Ubuntu):
+
+1. Instale as dependências básicas (Python e git):
+
+```bash
+sudo apt update
+sudo apt install -y python3 python3-pip git
+```
+
+2. Clone o repositório diretamente do GitHub:
+
+```bash
+git clone https://github.com/pedropagotto/py-db-install.git
+cd py-db-install
+```
+
+*(Substitua a URL pelo endereço real do seu repositório. Alternativamente, baixe o ZIP via GitHub e extraia os arquivos.)*
+
+3. Nenhuma instalação via pip é necessária — o projeto usa apenas a biblioteca padrão do Python (sem dependências externas, conforme `requirements.txt`).
+
+4. Execute a ferramenta:
+
+```bash
+python3 pg_main.py
+```
+
+Ou invoque os scripts diretamente:
+
+```bash
+python3 pg_install.py --help
+python3 pg_backup_restore.py --help
+```
+
+**Nota sobre distribuição**: Atualmente o uso é via clone ou download manual. No futuro, será possível instalar com `pip install git+https://github.com/...` após adicionar `pyproject.toml`.
+
 ## Estrutura do Projeto
 ```
-database-pg/
+py-db-install/
 ├── README.md
 ├── requirements.txt
 ├── config.example.json
