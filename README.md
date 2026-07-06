@@ -9,6 +9,25 @@ Projeto simples em Python para facilitar backups e restores de bancos de dados P
   2. Backup de container Docker → Restore direto em outro container Docker.
   3. Backup de servidor PostgreSQL sem container → Restore em outro servidor sem container.
 
+## Instalação do PostgreSQL (Debian/Ubuntu)
+O script `pg_install.py` automatiza a instalação completa do PostgreSQL em servidores Debian ou Ubuntu:
+
+```bash
+sudo python pg_install.py
+```
+
+Opções:
+- `--user NOME` : nome do usuário (padrão: postgres_app)
+- `--database NOME` : nome do banco (padrão: app_db)
+- `--password SENHA` : senha customizada (será gerada aleatória se omitida)
+- `--skip-install` : pula instalação (útil para configurar apenas usuário/banco)
+
+Ao final, o script:
+- Imprime as credenciais (usuário, senha, host, porta, banco)
+- Realiza teste de conexão com `SELECT 1` para confirmar que está funcionando
+
+**Nota**: Execute sempre com `sudo`. A senha gerada é exibida apenas uma vez.
+
 ## Requisitos
 - Python 3.8+
 - Ferramentas PostgreSQL instaladas localmente (`pg_dump`, `pg_restore`, `psql`) OU Docker CLI (para cenários com containers)
@@ -22,6 +41,7 @@ database-pg/
 ├── requirements.txt
 ├── config.example.json
 ├── pg_backup_restore.py
+├── pg_install.py
 └── .env.example
 ```
 
