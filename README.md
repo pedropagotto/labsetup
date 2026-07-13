@@ -30,6 +30,8 @@ Se preferir, utilize os comandos simplificados via `make` para agilizar a execu�
 - `make install-postgres` : Executa o instalador do PostgreSQL (requer sudo).
 - `make install-docker` : Executa o instalador do Docker CE (requer sudo).
 - `make install-kamal` : Executa o instalador do Kamal (requer sudo).
+- `make install-portainer` : Executa o instalador do Portainer CE (requer sudo).
+- `make config-kamal-ssl` : Gera templates de configuração de SSL Let's Encrypt para o Kamal.
 - `make install-all` : Executa o instalador All-in-One completo (requer sudo).
 - `make backup-restore` : Executa a ferramenta de Backup/Restore.
 - `make help` : Exibe a lista de comandos do Makefile disponíveis.
@@ -39,7 +41,9 @@ Se preferir, utilize os comandos simplificados via `make` para agilizar a execu�
 - `2` → **Instalar PostgreSQL** completo pronto para produção (`pg_install.py`)
 - `3` → **Instalar Docker CE** de forma otimizada (`docker_install.py`)
 - `4` → **Instalar Kamal** via Ruby/gem (`kamal_install.py`)
-- `5` → **Instalação Completa All-in-One (AIO)**: Instala e configura Docker, Kamal e PostgreSQL sequencialmente, realizando testes de conexão e sugerindo reinicialização ao final.
+- `5` → **Instalar Portainer CE** de forma otimizada (`portainer_install.py`)
+- `6` → **Instalação Completa All-in-One (AIO)**: Instala e configura Docker, Kamal, Portainer CE e PostgreSQL sequencialmente, realizando testes de conexão e sugerindo reinicialização ao final.
+- `7` → **Configurar SSL Let's Encrypt no Kamal** (`kamal_ssl_config.py`): Gera de forma interativa configurações de SSL compartilháveis para Kamal 1 e Kamal 2.
 - `0` → **Sair**
 
 ### Atalhos via Linha de Comando (CLI):
@@ -48,6 +52,8 @@ Para facilitar a automação em servidores limpos (bare-metal ou VPS), você pod
 - `--postgres` / `--install-postgres` : Executa diretamente o instalador do PostgreSQL.
 - `--docker` / `--install-docker` : Executa diretamente o instalador do Docker.
 - `--kamal` / `--install-kamal` : Executa diretamente o instalador do Kamal.
+- `--portainer` / `--install-portainer` : Executa diretamente o instalador do Portainer CE.
+- `--kamal-ssl` / `--config-kamal-ssl` : Executa o gerador de configurações SSL para o Kamal.
 - `backup` / `restore` / `--backup-restore` : Repassa os argumentos diretamente para a ferramenta de backup e restore.
 
 *Qualquer argumento extra fornecido (ex: `--skip-install`, `--user`, `--password`) será repassado de forma inteligente para os instaladores correspondentes.*
@@ -60,16 +66,19 @@ sudo python3 pg_install.py
 ```
 
 Opções:
-- `--user NOME` : nome do usuário (padrão: postgres_app)
-- `--database NOME` : nome do banco (padrão: app_db)
-- `--password SENHA` : senha customizada (será solicitada interativamente se omitida; gerada aleatória se deixada vazia)
+- `--user NOME` : nome do usuário do aplicativo (padrão: postgres_app)
+- `--database NOME` : nome do banco do aplicativo (padrão: app_db)
+- `--password SENHA` : senha customizada do usuário do aplicativo (será solicitada interativamente se omitida; gerada aleatória se deixada vazia)
+- `--postgres-password SENHA` : senha customizada do superusuário administrador 'postgres' (será solicitada interativamente se omitida; gerada aleatória se deixada vazia)
 - `--skip-install` : pula instalação (útil para configurar apenas usuário/banco)
 
 Ao final, o script:
 - Configura de forma robusta e automática o acesso externo do PostgreSQL (ajustando `postgresql.conf` para `listen_addresses = '*'` e adicionando as permissões adequadas em `pg_hba.conf` para IPv4 e IPv6).
-- Imprime as credenciais (usuário, senha, host, porta, banco)
-- Realiza o teste padrão de conexão com `SELECT 1` para confirmar o funcionamento
-- Oferece a opção de executar um **teste de conexão personalizado** (solicitando host, porta, usuário, senha e banco)
+- Configura a senha do superusuário administrador `postgres`.
+- Imprime de forma estruturada as credenciais de acesso tanto do superusuário `postgres` quanto do usuário do aplicativo (usuário, senha, host, porta, banco).
+- Apresenta orientações claras sobre como realizar a conexão externa com o servidor (regras de firewall na nuvem, strings de conexão e comandos CLI).
+- Realiza o teste padrão de conexão com `SELECT 1` para confirmar o funcionamento.
+- Oferece a opção de executar um **teste de conexão personalizado** (solicitando host, porta, usuário, senha e banco).
 
 **Nota**: Execute sempre com `sudo`. A senha gerada é exibida apenas uma vez.
 
@@ -96,19 +105,50 @@ Funcionalidades:
 - Instala a versão completa do Ruby (`ruby-full`) e as ferramentas essenciais de compilação de extensões nativas (`build-essential`, `libssl-dev`, etc.).
 - Instala a gem `kamal` de forma global e limpa.
 
+## Instalação do Portainer CE (Debian/Ubuntu)
+O script `portainer_install.py` automatiza a instalação do Portainer CE (Community Edition) opensource no Docker:
+
+```bash
+sudo python3 portainer_install.py
+```
+
+Funcionalidades:
+- Verifica se o Docker está instalado e em execução no sistema.
+- Gerencia e remove containers antigos do Portainer que possam causar conflitos de nome.
+- Cria o volume docker `portainer_data` para persistência de dados.
+- Executa o container oficial do Portainer CE mapeando as portas `8000` (túnel TCP), `9000` (HTTP) e `9443` (HTTPS) para fácil acesso.
+
+## Configuração de Certificado SSL Let's Encrypt no Kamal
+O script `kamal_ssl_config.py` automatiza e gera configurações robustas de certificados SSL Let's Encrypt para que todas as suas aplicações rodem sob HTTPS de forma simples.
+
+Ele oferece suporte tanto para o **Kamal 1** (utilizando Traefik como Proxy Reverso) quanto para o **Kamal 2** (utilizando o Kamal Proxy nativo).
+
+```bash
+python3 kamal_ssl_config.py
+```
+
+### Funcionalidades:
+- **Suporte Multiversão**: Gera templates completos de `config/deploy.yml` para Kamal 1 e Kamal 2.
+- **SSL Automatizado e Gratuito**: Configura os resolvedores ACME do Let's Encrypt para obter e renovar os certificados de forma 100% automatizada.
+- **Redirecionamento HTTP para HTTPS**: Configura regras globais para forçar conexões seguras automaticamente.
+- **Suporte Multi-App (Compartilhamento de SSL entre aplicações)**:
+  - **No Kamal 1 (Traefik)**: O Traefik roda de forma centralizada. A primeira aplicação configurada inicia o Traefik com a escuta e volume Let's Encrypt. Todas as demais aplicações compartilhando o mesmo servidor precisam apenas de `labels` apontando para o entrypoint `websecure` e o certresolver do Traefik, sem necessidade de redefinir o bloco global. O script também cria automaticamente o hook `.kamal/hooks/docker-setup` para garantir as permissões estritas de segurança (`chmod 600`) na persistência do arquivo `acme.json` no servidor remoto.
+  - **No Kamal 2 (Kamal Proxy)**: O Kamal Proxy foi projetado para suportar múltiplas aplicações nativamente. Cada aplicação declara seu domínio e a diretiva `ssl: true` em seu bloco `proxy`. O Kamal Proxy centraliza as requisições das portas 80/443 e gerencia os certificados de cada aplicação dinamicamente de forma isolada e segura.
+
 ## Instalação Completa All-in-One (AIO)
 A ferramenta permite a instalação coordenada e limpa de todos os recursos de uma só vez:
 
 ```bash
 sudo python3 pg_main.py --all
 ```
-Ou escolhendo a opção `5` no menu principal.
+Ou escolhendo a opção `6` no menu principal.
 
 A instalação All-in-One realiza:
 1. Instalação e configuração completa do Docker CE sem forçar um reboot imediato.
 2. Instalação e configuração do Ruby, pacotes de compilação essenciais e Kamal.
-3. Instalação do PostgreSQL completo pronto para produção com criação de usuário/banco e testes de conexão.
-4. Sugestão amigável de reinicialização do sistema no fim de todo o fluxo.
+3. Instalação e configuração do container oficial do Portainer CE opensource.
+4. Instalação do PostgreSQL completo pronto para produção com criação de usuário/banco e testes de conexão.
+5. Sugestão amigável de reinicialização do sistema no fim de todo o fluxo.
 
 ## Requisitos
 - Python 3.8+
@@ -167,6 +207,8 @@ py-db-install/
 ├── config.example.json    # Exemplo de configuração para backup/restore
 ├── docker_install.py      # Instalador de Docker CE otimizado para Debian/Ubuntu
 ├── kamal_install.py       # Instalador de Ruby e Kamal
+├── kamal_ssl_config.py    # Gerador de configurações e templates SSL para Kamal 1 e 2
+├── portainer_install.py   # Instalador de Portainer CE opensource
 ├── pg_install.py          # Instalador completo do PostgreSQL para Debian/Ubuntu
 ├── pg_backup_restore.py   # Script de Backup e Restore (Docker ou Bare-Metal)
 ├── pg_main.py             # Entrypoint da ferramenta interativa e direta All-in-One

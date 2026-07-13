@@ -19,7 +19,9 @@ def filter_args(args):
         "--all", "--install-all", "-aio",
         "--postgres", "--install-postgres",
         "--docker", "--install-docker",
-        "--kamal", "--install-kamal"
+        "--kamal", "--install-kamal",
+        "--portainer", "--install-portainer",
+        "--kamal-ssl", "--config-kamal-ssl"
     }
     return [arg for arg in args if arg not in control_args]
 
@@ -34,7 +36,9 @@ def print_menu():
     print("  2. Instalar PostgreSQL completo pronto para produção")
     print("  3. Instalar Docker CE (Debian/Ubuntu)")
     print("  4. Instalar Kamal (Debian/Ubuntu)")
-    print("  5. Instalação Completa All-in-One (PostgreSQL + Docker + Kamal)")
+    print("  5. Instalar Portainer CE (Debian/Ubuntu)")
+    print("  6. Instalação Completa All-in-One (PostgreSQL + Docker + Kamal + Portainer)")
+    print("  7. Configurar SSL Let's Encrypt no Kamal (Compartilhável)")
     print("  0. Sair")
     print("=" * 60)
 
@@ -124,36 +128,83 @@ def run_kamal_install(extra_args=None):
         return False
 
 
+def run_portainer_install(extra_args=None):
+    """Executa o script de instalação do Portainer."""
+    script_path = Path(__file__).parent / "portainer_install.py"
+    if not script_path.exists():
+        print("[ERRO] portainer_install.py não encontrado!")
+        return False
+
+    print("\n[INFO] Iniciando instalador do Portainer CE...")
+    print("[AVISO] Esta operação requer sudo/root.\n")
+
+    args = extra_args if extra_args is not None else sys.argv[1:]
+    cmd = [sys.executable, str(script_path)] + filter_args(args)
+    try:
+        proc = subprocess.run(cmd, check=False)
+        return proc.returncode == 0
+    except KeyboardInterrupt:
+        print("\n[INFO] Operação interrompida pelo usuário.")
+        return False
+
+
+def run_kamal_ssl_config(extra_args=None):
+    """Executa o configurador SSL para o Kamal."""
+    script_path = Path(__file__).parent / "kamal_ssl_config.py"
+    if not script_path.exists():
+        print("[ERRO] kamal_ssl_config.py não encontrado!")
+        return False
+
+    print("\n[INFO] Iniciando configurador SSL do Kamal...")
+
+    args = extra_args if extra_args is not None else sys.argv[1:]
+    cmd = [sys.executable, str(script_path)] + filter_args(args)
+    try:
+        proc = subprocess.run(cmd, check=False)
+        return proc.returncode == 0
+    except KeyboardInterrupt:
+        print("\n[INFO] Operação interrompida pelo usuário.")
+        return False
+
+
 def run_all_in_one():
-    """Executa a instalação sequencial de todos os componentes (Docker, Kamal, PostgreSQL)."""
+    """Executa a instalação sequencial de todos os componentes (Docker, Kamal, Portainer, PostgreSQL)."""
     print("\n" + "=" * 60)
     print("INICIANDO INSTALAÇÃO COMPLETA ALL-IN-ONE (AIO)")
     print("=" * 60)
     print("Esta operação irá instalar de forma otimizada para produção:")
     print("  1. Docker CE (e configurar seu usuário)")
     print("  2. Ruby e Kamal")
-    print("  3. PostgreSQL (banco de dados completo, usuário e teste de conexão)")
+    print("  3. Portainer CE (Interface web de gerenciamento)")
+    print("  4. PostgreSQL (banco de dados completo, usuário e teste de conexão)")
     print("=" * 60 + "\n")
 
     # Passamos sys.argv[1:] para os scripts para preservar flags como --skip-install
     extra_args = sys.argv[1:]
 
     # Passo 1: Docker (forçando skip de reboot imediato)
-    print("\n>>> [PASSO 1/3] Instalação do Docker CE...")
+    print("\n>>> [PASSO 1/4] Instalação do Docker CE...")
     docker_ok = run_docker_install(extra_args=extra_args, skip_reboot=True)
     if not docker_ok:
         print("[ERRO] Falha na instalação do Docker. Abortando instalação All-in-One.")
         return
 
     # Passo 2: Kamal
-    print("\n>>> [PASSO 2/3] Instalação do Kamal...")
+    print("\n>>> [PASSO 2/4] Instalação do Kamal...")
     kamal_ok = run_kamal_install(extra_args=extra_args)
     if not kamal_ok:
         print("[ERRO] Falha na instalação do Kamal. Abortando instalação All-in-One.")
         return
 
-    # Passo 3: PostgreSQL
-    print("\n>>> [PASSO 3/3] Instalação do PostgreSQL completo...")
+    # Passo 3: Portainer CE
+    print("\n>>> [PASSO 3/4] Instalação do Portainer CE...")
+    portainer_ok = run_portainer_install(extra_args=extra_args)
+    if not portainer_ok:
+        print("[AVISO] Houve um problema na instalação do Portainer CE.")
+        # Não abortamos, pois os anteriores já foram instalados.
+
+    # Passo 4: PostgreSQL
+    print("\n>>> [PASSO 4/4] Instalação do PostgreSQL completo...")
     pg_ok = run_install(extra_args=extra_args)
     if not pg_ok:
         print("[AVISO] Houve um problema na instalação ou teste do PostgreSQL.")
@@ -162,7 +213,7 @@ def run_all_in_one():
     print("\n" + "=" * 60)
     print("[SUCCESS] INSTALAÇÃO COMPLETA ALL-IN-ONE CONCLUÍDA!")
     print("=" * 60)
-    print("Todos os componentes (Docker, Kamal, PostgreSQL) foram processados.")
+    print("Todos os componentes (Docker, Kamal, Portainer, PostgreSQL) foram processados.")
     print("============================================================\n")
 
     # Se o Docker foi instalado, sugere reinicialização no final
@@ -193,6 +244,12 @@ def main():
         elif first_arg in ("--install-kamal", "--kamal"):
             run_kamal_install(sys.argv[2:])
             return
+        elif first_arg in ("--install-portainer", "--portainer"):
+            run_portainer_install(sys.argv[2:])
+            return
+        elif first_arg in ("--config-kamal-ssl", "--kamal-ssl"):
+            run_kamal_ssl_config(sys.argv[2:])
+            return
         elif first_arg in ("--install-all", "--all", "-aio"):
             run_all_in_one()
             return
@@ -205,7 +262,7 @@ def main():
     while True:
         print_menu()
         try:
-            choice = input("Digite sua escolha [0-5]: ").strip()
+            choice = input("Digite sua escolha [0-7]: ").strip()
         except (EOFError, KeyboardInterrupt):
             print("\nSaindo...")
             break
@@ -219,7 +276,11 @@ def main():
         elif choice == "4":
             run_kamal_install()
         elif choice == "5":
+            run_portainer_install()
+        elif choice == "6":
             run_all_in_one()
+        elif choice == "7":
+            run_kamal_ssl_config()
         elif choice == "0":
             print("Saindo da ferramenta principal. Até logo!")
             break

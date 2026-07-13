@@ -1,0 +1,52 @@
+# ==============================================================================
+# CONFIGURAÇÃO SSL LET'S ENCRYPT PARA KAMAL 1 (TRAEFIK)
+# ==============================================================================
+# Copie e adapte esta configuração no seu arquivo 'config/deploy.yml'
+#
+# COMO FUNCIONA O COMPARTILHAMENTO DE SSL ENTRE MÚLTIPLAS APLICAÇÕES:
+# 1. Traefik roda como um container global único por servidor.
+# 2. A primeira aplicação que subir com o bloco 'traefik:' irá inicializar o Traefik 
+#    com o resolvedor Let's Encrypt e mapeamento de portas.
+# 3. As demais aplicações no mesmo servidor NÃO precisam do bloco 'traefik:' completo.
+#    Elas precisam apenas declarar suas próprias 'labels' apontando para o entrypoint 'websecure'
+#    e o certresolver 'letsencrypt'. O Traefik irá gerar os certificados para todas de forma dinâmica!
+# ==============================================================================
+
+service: testservice
+image: myuser/testservice
+
+servers:
+  web:
+    hosts:
+      - 192.168.1.100  # SUBSTITUA pelo IP público do seu servidor
+    labels:
+      # Configura o roteamento seguro e a geração automatizada do certificado SSL
+      traefik.http.routers.testservice-web.entrypoints: websecure
+      traefik.http.routers.testservice-web.rule: Host(`mydomain.com`)
+      traefik.http.routers.testservice-web.tls.certresolver: letsencrypt
+      # Porta em que a sua aplicação escuta DENTRO do container Docker (ex: 80, 3000, 8080)
+      traefik.http.services.testservice-web.loadbalancer.server.port: 3000
+
+# Configuração global do Traefik reverse proxy
+traefik:
+  options:
+    publish:
+      - "443:443"  # Mapeia a porta HTTPS externa para o Traefik
+    volume:
+      # Armazena os certificados gerados para que não se percam em reinicializações
+      - "/letsencrypt/acme.json:/letsencrypt/acme.json"
+  args:
+    # Cria as portas de entrada de tráfego HTTP e HTTPS
+    entryPoints.web.address: ":80"
+    entryPoints.websecure.address: ":443"
+    
+    # Redirecionamento automático e permanente de todo tráfego HTTP para HTTPS
+    entryPoints.web.http.redirections.entryPoint.to: websecure
+    entryPoints.web.http.redirections.entryPoint.scheme: https
+    entryPoints.web.http.redirections.entrypoint.permanent: true
+    
+    # Configura o protocolo ACME do Let's Encrypt para validação via desafio HTTP
+    certificatesResolvers.letsencrypt.acme.email: "test@mydomain.com"
+    certificatesResolvers.letsencrypt.acme.storage: "/letsencrypt/acme.json"
+    certificatesResolvers.letsencrypt.acme.httpchallenge: true
+    certificatesResolvers.letsencrypt.acme.httpchallenge.entrypoint: web

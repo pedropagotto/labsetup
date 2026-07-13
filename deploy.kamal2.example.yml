@@ -1,0 +1,25 @@
+# ==============================================================================
+# CONFIGURAÇÃO SSL LET'S ENCRYPT PARA KAMAL 2 (KAMAL PROXY)
+# ==============================================================================
+# Copie e adapte esta configuração no seu arquivo 'config/deploy.yml'
+#
+# COMO FUNCIONA O COMPARTILHAMENTO DE SSL ENTRE MÚLTIPLAS APLICAÇÕES:
+# 1. Kamal 2 substitui o Traefik pelo Kamal Proxy nativo.
+# 2. O Kamal Proxy suporta nativamente múltiplas aplicações por servidor.
+# 3. Basta habilitar 'ssl: true' e informar o 'host' em cada uma das aplicações (deploy.yml).
+#    O Kamal Proxy irá obter e gerenciar de forma automática e independente os certificados SSL 
+#    Let's Encrypt para cada domínio associado a cada container!
+# ==============================================================================
+
+service: testservice
+image: myuser/testservice
+
+servers:
+  web:
+    - 192.168.1.100  # SUBSTITUA pelo IP público do seu servidor
+
+# Kamal Proxy configura SSL nativo para cada aplicação com extrema simplicidade
+proxy:
+  ssl: true          # Ativa o Let's Encrypt automático via Kamal Proxy
+  host: mydomain.com     # Domínio que apontará para esta aplicação
+  app_port: 8080  # Porta em que sua aplicação escuta dentro do container (ex: 80, 3000, 8080)

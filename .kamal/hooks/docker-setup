@@ -1,0 +1,19 @@
+#!/bin/sh
+# ==============================================================================
+# KAMAL HOOK: docker-setup
+# Localização: .kamal/hooks/docker-setup (deve ser executável: chmod +x)
+#
+# Este hook roda automaticamente no Kamal 1 antes de inicializar o Docker.
+# Ele cria a estrutura de arquivos para o Let's Encrypt com as permissões corretas
+# requeridas pelo Traefik (permissão estrita chmod 600 em acme.json).
+# ==============================================================================
+
+echo "[HOOK] Inicializando estrutura do Let's Encrypt com permissões seguras..."
+
+for host in $(echo $KAMAL_HOSTS | sed "s/,/ /g")
+do
+  echo "Configurando servidor: $host"
+  ssh root@$host 'mkdir -p /letsencrypt && touch /letsencrypt/acme.json && chmod 600 /letsencrypt/acme.json'
+done
+
+echo "[HOOK] Estrutura Let's Encrypt criada com sucesso!"
