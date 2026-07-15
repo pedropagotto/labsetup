@@ -241,10 +241,17 @@ def install_postgres(args):
 
 
 def setup_database(args):
-    """Cria usuário e banco de dados com senha."""
+    """Cria usuário e banco de dados com senha e configura a senha do superusuário postgres."""
     user = args.user or "postgres_app"
     db = args.database or "app_db"
     password = args.password or generate_password()
+    pg_password = args.postgres_password or generate_password()
+
+    # Altera a senha do superusuário administrador 'postgres'
+    alter_pg_sql = f"ALTER USER postgres WITH PASSWORD '{pg_password}';"
+    run_cmd([
+        "sudo", "-u", "postgres", "psql", "-c", alter_pg_sql
+    ], check=False)
 
     # Cria usuário (via psql como postgres)
     create_user_sql = f"CREATE USER {user} WITH PASSWORD '{password}';"
@@ -264,7 +271,7 @@ def setup_database(args):
         "sudo", "-u", "postgres", "psql", "-c", grant_sql
     ], check=False)
 
-    return user, db, password
+    return user, db, password, pg_password
 
 
 def test_postgres(user, db, password, host="localhost", port=5432):
@@ -296,21 +303,51 @@ def test_postgres(user, db, password, host="localhost", port=5432):
         return False
 
 
-def print_credentials(user, password, host="localhost", port=5432, db=None):
-    """Imprime informações de conexão."""
-    print("\n" + "=" * 50)
-    print("INFORMAÇÕES DE CONEXÃO POSTGRESQL")
-    print("=" * 50)
+def print_credentials(user, password, pg_password=None, host="localhost", port=5432, db=None):
+    """Imprime informações de conexão e orientações de acesso externo."""
+    print("\n" + "=" * 60)
+    print("INFORMAÇÕES DE CONEXÃO DO POSTGRESQL (INSTALAÇÃO CONCLUÍDA)")
+    print("=" * 60)
+    print("1. ADMINISTRADOR DO SISTEMA (SUPERUSER)")
+    print(f"  Usuário: postgres")
+    print(f"  Senha:   {pg_password or 'Não configurada (utilize conexões locais peer)'}")
+    print(f"  Host:    {host}")
+    print(f"  Porta:   {port}")
+    print(f"  Banco:   postgres")
+    print("-" * 60)
+    print("2. USUÁRIO E BANCO DO APLICATIVO")
     print(f"  Usuário: {user}")
     print(f"  Senha:   {password}")
     print(f"  Host:    {host}")
     print(f"  Porta:   {port}")
     if db:
         print(f"  Banco:   {db}")
-    print("=" * 50)
-    print("IMPORTANTE: Anote a senha! Ela não será mostrada novamente.")
-    print("Use: psql -U {} -d {} -h {} -p {}".format(user, db or "postgres", host, port))
-    print("=" * 50 + "\n")
+    print("=" * 60)
+    print("IMPORTANTE: Anote todas as senhas! Elas não serão exibidas novamente.")
+    print("=" * 60)
+    print("ORIENTAÇÕES PARA CONEXÃO EXTERNA")
+    print("=" * 60)
+    print("  1. Liberação de Firewall:")
+    print("     - O instalador liberou a porta 5432 no firewall do sistema (UFW/iptables).")
+    print("     - IMPORTANTE: Se o seu servidor está hospedado em nuvem (AWS, GCP, Azure,")
+    print("       DigitalOcean, Oracle Cloud, etc.), você DEVE liberar a porta 5432/tcp")
+    print("       nas regras do grupo de segurança (firewall de rede) do console da nuvem.")
+    print("  2. Conexões de Qualquer Origem:")
+    print("     - O arquivo postgresql.conf foi ajustado para listen_addresses = '*'")
+    print("     - O arquivo pg_hba.conf foi ajustado para aceitar conexões via IPv4 (0.0.0.0/0)")
+    print("       e IPv6 (::/0) usando autenticação por senha de forma segura.")
+    print("  3. Como se conectar de fora:")
+    print("     - Ferramentas Visuais (DBeaver, pgAdmin, TablePlus, etc.):")
+    print("       - Escolha PostgreSQL.")
+    print("       - Host: Use o IP Público do seu servidor.")
+    print("       - Porta: 5432")
+    print("       - Usuário: postgres (para administração) ou o usuário do aplicativo.")
+    print("       - Senha: Use a senha correspondente exibida acima.")
+    print("       - Banco de Dados: postgres (para admin) ou o banco do app.")
+    print("     - Via Linha de Comando (CLI):")
+    print(f"       psql -h <IP_PUBLICO> -U postgres -d postgres")
+    print(f"       psql -h <IP_PUBLICO> -U {user} -d {db if db else 'postgres'}")
+    print("=" * 60 + "\n")
 
 
 def main():
@@ -320,13 +357,18 @@ def main():
     parser.add_argument("--user", default=None, help="Nome do usuário (padrão: postgres_app)")
     parser.add_argument("--database", default=None, help="Nome do banco (padrão: app_db)")
     parser.add_argument("--password", default=None, help="Senha (será solicitada interativamente se omitida; gerada aleatória se vazia)")
+    parser.add_argument("--postgres-password", default=None, help="Senha do superusuário 'postgres' (será solicitada interativamente se omitida; gerada aleatória se vazia)")
     parser.add_argument("--skip-install", action="store_true", help="Pula a instalação (assume já instalado)")
     args, unknown = parser.parse_known_args()
 
     # Solicita senha interativamente se não informada via CLI (senha não ecoa no terminal)
     if not args.password:
-        senha = getpass.getpass("Senha para o usuário PostgreSQL (deixe vazio para gerar aleatória): ").strip()
+        senha = getpass.getpass("Senha para o usuário PostgreSQL do aplicativo (deixe vazio para gerar aleatória): ").strip()
         args.password = senha or None
+
+    if not args.postgres_password:
+        senha_pg = getpass.getpass("Senha para o superusuário administrador 'postgres' (deixe vazio para gerar aleatória): ").strip()
+        args.postgres_password = senha_pg or None
 
     if os.geteuid() != 0 and not args.skip_install:
         print("[ERRO] Execute como root ou com sudo para instalar pacotes.")
@@ -335,7 +377,7 @@ def main():
     if not args.skip_install:
         install_postgres(args)
 
-    user, db, password = setup_database(args)
+    user, db, password, pg_password = setup_database(args)
 
     if os.geteuid() == 0:
         configure_external_access()
@@ -344,7 +386,7 @@ def main():
 
     test_ok = test_postgres(user, db, password)
 
-    print_credentials(user, password, db=db)
+    print_credentials(user, password, pg_password=pg_password, db=db)
 
     # Solicita se deseja realizar teste de conexão personalizado
     try:
