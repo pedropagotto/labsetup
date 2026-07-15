@@ -10,6 +10,7 @@ import getpass
 import os
 import platform
 import secrets
+import shutil
 import string
 import subprocess
 import sys
@@ -240,6 +241,116 @@ def install_postgres(args):
     configure_firewall()
 
 
+def get_hba_file():
+    """Obtém o caminho do arquivo pg_hba.conf."""
+    hba_file = None
+    try:
+        hba_file = run_cmd(
+            ["sudo", "-u", "postgres", "psql", "-t", "-P", "format=unaligned", "-c", "SHOW hba_file;"],
+            capture_output=True
+        )
+    except Exception:
+        pass
+    if not hba_file or not os.path.exists(hba_file):
+        pg_dir = "/etc/postgresql"
+        if os.path.exists(pg_dir):
+            versions = sorted(os.listdir(pg_dir), reverse=True)
+            for version in versions:
+                main_dir = os.path.join(pg_dir, version, "main")
+                if os.path.isdir(main_dir):
+                    hba_file = os.path.join(main_dir, "pg_hba.conf")
+                    break
+    return hba_file
+
+
+def reset_user_passwords(user, password, pg_password):
+    """
+    Tenta resetar as senhas usando sudo -u postgres psql.
+    Se falhar, e estiver rodando como root, tenta o modo de recuperação alterando pg_hba.conf para trust.
+    """
+    print("[INFO] Iniciando reconfiguração de senhas...")
+    alter_pg_sql = f"ALTER USER postgres WITH PASSWORD '{pg_password}';"
+    alter_user_sql = f"ALTER USER {user} WITH PASSWORD '{password}';"
+    create_user_sql = f"CREATE USER {user} WITH PASSWORD '{password}';"
+    
+    success = False
+    try:
+        print("[INFO] Tentando atualizar senhas diretamente via peer authentication...")
+        run_cmd(["sudo", "-u", "postgres", "psql", "-c", alter_pg_sql])
+        try:
+            run_cmd(["sudo", "-u", "postgres", "psql", "-c", alter_user_sql])
+        except Exception:
+            run_cmd(["sudo", "-u", "postgres", "psql", "-c", create_user_sql])
+        success = True
+        print("[SUCCESS] Senhas atualizadas com sucesso usando peer authentication!")
+    except Exception as e:
+        print(f"[AVISO] Não foi possível atualizar diretamente via peer: {e}")
+        print("[INFO] Tentando modo de recuperação (modificando pg_hba.conf para 'trust')...")
+        
+        if os.geteuid() != 0:
+            print("[ERRO] Para rodar o modo de recuperação (modificar pg_hba.conf), este script precisa ser executado com sudo/root.")
+            return False
+            
+        hba_file = get_hba_file()
+        if not hba_file or not os.path.exists(hba_file):
+            print("[ERRO] Arquivo pg_hba.conf não encontrado. Não é possível entrar no modo de recuperação.")
+            return False
+            
+        print(f"[INFO] pg_hba.conf encontrado em: {hba_file}")
+        hba_backup = hba_file + ".bak"
+        try:
+            shutil.copy2(hba_file, hba_backup)
+            print(f"[INFO] Backup do pg_hba.conf criado em: {hba_backup}")
+            
+            with open(hba_file, "r") as f:
+                content = f.read()
+                
+            lines = content.splitlines()
+            modified_lines = []
+            for line in lines:
+                stripped = line.strip()
+                if stripped.startswith("local") and not stripped.startswith("#"):
+                    parts = stripped.split()
+                    if len(parts) >= 4:
+                        parts[-1] = "trust"
+                        modified_lines.append("\t".join(parts))
+                    else:
+                        modified_lines.append("local   all             all                                     trust")
+                else:
+                    modified_lines.append(line)
+                    
+            with open(hba_file, "w") as f:
+                f.write("\n".join(modified_lines) + "\n")
+                
+            print("[INFO] pg_hba.conf modificado para 'trust'. Reiniciando o PostgreSQL...")
+            run_cmd(["systemctl", "restart", "postgresql"])
+            
+            env = os.environ.copy()
+            if "PGPASSWORD" in env:
+                del env["PGPASSWORD"]
+                
+            run_cmd(["psql", "-U", "postgres", "-d", "postgres", "-c", alter_pg_sql], env=env)
+            try:
+                run_cmd(["psql", "-U", "postgres", "-d", "postgres", "-c", alter_user_sql], env=env)
+            except Exception:
+                run_cmd(["psql", "-U", "postgres", "-d", "postgres", "-c", create_user_sql], env=env)
+                
+            print("[SUCCESS] Senhas atualizadas com sucesso no modo de recuperação!")
+            success = True
+            
+        except Exception as err:
+            print(f"[ERRO] Falha durante o modo de recuperação: {err}")
+        finally:
+            if os.path.exists(hba_backup):
+                print("[INFO] Restaurando o arquivo pg_hba.conf original...")
+                shutil.copy2(hba_backup, hba_file)
+                os.remove(hba_backup)
+                print("[INFO] Reiniciando o PostgreSQL para aplicar o arquivo original...")
+                run_cmd(["systemctl", "restart", "postgresql"])
+                
+    return success
+
+
 def setup_database(args):
     """Cria usuário e banco de dados com senha e configura a senha do superusuário postgres."""
     user = args.user or "postgres_app"
@@ -359,17 +470,60 @@ def main():
     parser.add_argument("--password", default=None, help="Senha (será solicitada interativamente se omitida; gerada aleatória se vazia)")
     parser.add_argument("--postgres-password", default=None, help="Senha do superusuário 'postgres' (será solicitada interativamente se omitida; gerada aleatória se vazia)")
     parser.add_argument("--skip-install", action="store_true", help="Pula a instalação (assume já instalado)")
+    parser.add_argument("--reset-passwords", action="store_true", help="Apenas recupera/reseta senhas de usuários")
     args, unknown = parser.parse_known_args()
+
+    # Menu de seleção se nenhum argumento CLI foi especificado
+    reset_mode = args.reset_passwords
+    if len(sys.argv) == 1:
+        print("=" * 60)
+        print("GERENCIADOR E INSTALADOR POSTGRESQL")
+        print("=" * 60)
+        print("1) Instalar/Configurar Banco de Dados Completo (Padrão)")
+        print("2) Apenas Recuperar/Resetar senhas de usuários (Administrador & App)")
+        print("=" * 60)
+        try:
+            opcao = input("Escolha uma opção (1 ou 2, padrão: 1): ").strip()
+            if opcao == "2":
+                reset_mode = True
+        except (EOFError, KeyboardInterrupt):
+            print("\n[INFO] Cancelado pelo usuário.")
+            sys.exit(0)
+
+    # Coleta de informações básicas
+    user = args.user or "postgres_app"
+    db = args.database or "app_db"
 
     # Solicita senha interativamente se não informada via CLI (senha não ecoa no terminal)
     if not args.password:
-        senha = getpass.getpass("Senha para o usuário PostgreSQL do aplicativo (deixe vazio para gerar aleatória): ").strip()
-        args.password = senha or None
+        msg = f"Senha para o usuário PostgreSQL do aplicativo '{user}' (deixe vazio para gerar aleatória): "
+        senha = getpass.getpass(msg).strip()
+        args.password = senha or generate_password()
+    else:
+        args.password = args.password or generate_password()
 
     if not args.postgres_password:
         senha_pg = getpass.getpass("Senha para o superusuário administrador 'postgres' (deixe vazio para gerar aleatória): ").strip()
-        args.postgres_password = senha_pg or None
+        args.postgres_password = senha_pg or generate_password()
+    else:
+        args.postgres_password = args.postgres_password or generate_password()
 
+    password = args.password
+    pg_password = args.postgres_password
+
+    if reset_mode:
+        # Apenas reconfigura senhas
+        success = reset_user_passwords(user, password, pg_password)
+        if success:
+            print_credentials(user, password, pg_password=pg_password, db=db)
+            # Tenta testar conexões locais com as novas senhas
+            test_postgres(user, db, password)
+        else:
+            print("[ERRO] Não foi possível reconfigurar as senhas.")
+            sys.exit(1)
+        return
+
+    # Modo de Instalação normal
     if os.geteuid() != 0 and not args.skip_install:
         print("[ERRO] Execute como root ou com sudo para instalar pacotes.")
         sys.exit(1)
