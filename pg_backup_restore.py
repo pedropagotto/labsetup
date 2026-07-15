@@ -207,7 +207,116 @@ def parse_connection_args(prefix, args_dict):
     return conn
 
 
+
+def run_interactive():
+    print("=" * 60)
+    print("DATABASE PG - MIGRAÇÃO E BACKUP INTERATIVO")
+    print("=" * 60)
+    print("Escolha o método de cópia/migração:")
+    print("  1. Backup de Docker para arquivo local + Restore no servidor físico (2 etapas)")
+    print("  2. Backup + Restore Direto (Streaming direto sem arquivo intermediário)")
+    print("=" * 60)
+    try:
+        escolha = input("Escolha uma opção [1-2]: ").strip()
+    except (EOFError, KeyboardInterrupt):
+        print("\n[INFO] Operação cancelada.")
+        sys.exit(0)
+
+    if escolha not in ["1", "2"]:
+        print("[ERRO] Opção inválida.")
+        sys.exit(1)
+
+    def prompt_conn_docker(role):
+        print(f"\n--- Dados de Conexão do PostgreSQL (Container Docker de {role}) ---")
+        container = input("Nome do container Docker: ").strip()
+        while not container:
+            print("[ERRO] Nome do container é obrigatório.")
+            container = input("Nome do container Docker: ").strip()
+            
+        db = input("Nome do banco de dados: ").strip()
+        while not db:
+            print("[ERRO] Nome do banco de dados é obrigatório.")
+            db = input("Nome do banco de dados: ").strip()
+            
+        user = input("Usuário (padrão: postgres): ").strip() or "postgres"
+        password = getpass.getpass("Senha: ")
+        
+        return {
+            "type": "docker",
+            "container_name": container,
+            "host": "localhost",
+            "port": 5432,
+            "database": db,
+            "user": user,
+            "password": password if password else None
+        }
+
+    def prompt_conn_physical(role):
+        print(f"\n--- Dados de Conexão do PostgreSQL (Servidor Físico de {role}) ---")
+        host = input("Host/IP do servidor: ").strip()
+        while not host:
+            print("[ERRO] Host/IP é obrigatório.")
+            host = input("Host/IP do servidor: ").strip()
+            
+        port_str = input("Porta (padrão: 5432): ").strip() or "5432"
+        try:
+            port = int(port_str)
+        except ValueError:
+            port = 5432
+            
+        db = input("Nome do banco de dados: ").strip()
+        while not db:
+            print("[ERRO] Nome do banco de dados é obrigatório.")
+            db = input("Nome do banco de dados: ").strip()
+            
+        user = input("Usuário (padrão: postgres): ").strip() or "postgres"
+        password = getpass.getpass("Senha: ")
+        
+        return {
+            "type": "local",
+            "container_name": None,
+            "host": host,
+            "port": port,
+            "database": db,
+            "user": user,
+            "password": password if password else None
+        }
+
+    args = argparse.Namespace()
+    args.format = "custom"
+
+    if escolha == "1":
+        # 2 etapas
+        args.command = "backup"
+        args.source = prompt_conn_docker("Origem")
+        args.backup_file = prompt_backup_path()
+        print("\n[INFO] Iniciando Etapa 1/2: Gerando arquivo de backup...")
+        do_backup(args)
+        
+        args.command = "restore"
+        args.target = prompt_conn_physical("Destino")
+        print("\n[INFO] Iniciando Etapa 2/2: Restaurando no servidor físico...")
+        do_restore(args)
+        
+        args.func = lambda x: print("\n[SUCCESS] Migração em duas etapas concluída com sucesso!")
+
+    elif escolha == "2":
+        # Direto / Streaming
+        args.command = "backup-restore"
+        args.source = prompt_conn_docker("Origem")
+        args.target = prompt_conn_physical("Destino")
+        args.func = do_backup_restore
+
+    return args
+
+
+
 def main():
+    if len(sys.argv) == 1:
+        args = run_interactive()
+        args.func(args)
+        return
+
     parser = argparse.ArgumentParser(
         description="Ferramenta simples de Backup/Restore PostgreSQL (Docker + Bare-metal)"
     )
@@ -301,3 +410,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
