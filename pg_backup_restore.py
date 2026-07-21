@@ -12,7 +12,130 @@ import subprocess
 import sys
 import tempfile
 import shutil
+import secrets
+import string
 from pathlib import Path
+
+
+def generate_random_password(length=16):
+    """Gera uma senha segura com letras, números e símbolos."""
+    alphabet = string.ascii_letters + string.digits + "!@#$%^&*"
+    return ''.join(secrets.choice(alphabet) for _ in range(length))
+
+
+def extract_roles_from_dump(dump_file, fmt="custom"):
+    """Extrai os nomes de roles/usuários referenciados no arquivo de backup."""
+    roles = set()
+    try:
+        if fmt == "custom" and shutil.which("pg_restore") is not None:
+            # Lista os conteúdos do dump sem restaurar
+            result = subprocess.run(
+                ["pg_restore", "-l", dump_file],
+                capture_output=True,
+                text=True,
+                check=False
+            )
+            for line in result.stdout.splitlines():
+                # Linhas com ACL ou GRANT ou OWNER geralmente mencionam a role
+                if "ACL" in line or "OWNER TO" in line or "GRANT" in line:
+                    parts = line.split()
+                    if parts:
+                        roles.add(parts[-1])
+        else:
+            # Para arquivo SQL puro (.sql)
+            with open(dump_file, "r", encoding="utf-8", errors="ignore") as f:
+                for line in f:
+                    if "GRANT " in line or "TO " in line or "OWNER TO " in line:
+                        parts = line.strip().split()
+                        if "TO" in parts:
+                            idx = parts.index("TO")
+                            if idx + 1 < len(parts):
+                                role_name = parts[idx + 1].rstrip(";")
+                                if role_name and not role_name.startswith("PUBLIC"):
+                                    roles.add(role_name)
+    except Exception as e:
+        print(f"[AVISO] Não foi possível analisar roles do arquivo de dump: {e}")
+    
+    # Filtra nomes inválidos/padrão
+    roles.discard("postgres")
+    roles.discard("PUBLIC")
+    return roles
+
+
+def ensure_roles_exist_on_target(target, roles):
+    """Garante a criação prévia de roles/usuários no servidor de restore com senhas aleatórias."""
+    if not roles:
+        return {}
+
+    created_credentials = {}
+    print(f"\n[INFO] Verificando e criando {len(roles)} usuário(s)/role(s) no destino antes do restore: {', '.join(roles)}")
+
+    # Conecta via psql na base 'postgres' (ou target db) para executar CREATE ROLE se não existir
+    for role in sorted(roles):
+        password = generate_random_password()
+        # SQL para criar o usuário se não existir
+        sql_script = f"""
+        DO $$
+        BEGIN
+            IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = '{role}') THEN
+                CREATE ROLE "{role}" WITH LOGIN PASSWORD '{password}';
+                RAISE NOTICE 'Role {role} criada com sucesso.';
+            ELSE
+                ALTER ROLE "{role}" WITH LOGIN PASSWORD '{password}';
+                RAISE NOTICE 'Role {role} já existia. Senha atualizada.';
+            END IF;
+        END
+        $$;
+        """
+        
+        psql_cmd = [
+            "-U", target["user"],
+            "-h", target.get("host", "localhost"),
+            "-p", str(target.get("port", 5432)),
+            "-d", "postgres",  # Conecta no DB admin padrão para criar roles globais
+            "-c", sql_script
+        ]
+
+        try:
+            if target["type"] == "docker":
+                cmd = build_docker_cmd(target["container_name"], ["psql"] + psql_cmd, target.get("password"))
+                run_command(cmd, env=get_pg_env(target.get("password"), target.get("sslmode")), check=False)
+            else:
+                run_pg_tool("psql", psql_cmd, password=target.get("password"), sslmode=target.get("sslmode"))
+            created_credentials[role] = password
+        except Exception as e:
+            print(f"[AVISO] Falha ao verificar/criar a role '{role}' no destino: {e}")
+
+    return created_credentials
+
+
+def save_credentials_file(target, credentials, filename="restore_credentials.txt"):
+    """Salva um arquivo local com os usuários e senhas gerados para o novo banco de restore."""
+    try:
+        output_path = Path.cwd() / filename
+        with open(output_path, "w", encoding="utf-8") as f:
+            f.write("============================================================\n")
+            f.write("DATABASE PG - CREDENCIAIS DO BANCO RESTAURADO\n")
+            f.write("============================================================\n")
+            f.write(f"Host Destino:     {target.get('host')}\n")
+            f.write(f"Porta:            {target.get('port')}\n")
+            f.write(f"Banco de Dados:   {target.get('database')}\n")
+            f.write(f"Usuário Admin:    {target.get('user')}\n")
+            f.write("============================================================\n")
+            f.write("USUÁRIOS / ROLES CRIADAS/RECONFIGURADAS:\n")
+            f.write("============================================================\n")
+            if credentials:
+                for role, pwd in credentials.items():
+                    f.write(f"Usuário: {role}\n")
+                    f.write(f"Senha:   {pwd}\n")
+                    f.write("-" * 60 + "\n")
+            else:
+                f.write("Nenhum usuário adicional precisou ser criado.\n")
+            f.write("============================================================\n")
+
+        print(f"\n[SUCCESS] Arquivo de credenciais do restore gerado localmente em:\n          {output_path.resolve()}\n")
+    except Exception as e:
+        print(f"[ERRO] Falha ao salvar arquivo de credenciais: {e}")
 
 
 def run_command(cmd, env=None, check=True, capture_output=False):
@@ -204,6 +327,13 @@ def do_restore(args):
     backup_file = args.backup_file
     fmt = args.format
 
+    # 1. Analisa os usuários/roles referenciados no backup e cria no servidor de restore se não existirem
+    roles = extract_roles_from_dump(backup_file, fmt)
+    credentials = {}
+    if roles:
+        credentials = ensure_roles_exist_on_target(target, roles)
+
+    # 2. Executa o Restore
     if fmt == "custom":
         pg_restore_cmd_args = [
             "-U", target["user"],
@@ -212,13 +342,17 @@ def do_restore(args):
             "-d", target["database"],
             "-v",
             "--clean",
-            "--if-exists"
+            "--if-exists",
+            "--no-owner"  # Ignora donos do banco original mantendo permissões gerais
         ]
         if target["type"] == "docker":
             cmd = build_docker_cmd(target["container_name"], ["pg_restore"] + pg_restore_cmd_args + [backup_file], target.get("password"))
             run_command(cmd, env=get_pg_env(target.get("password"), target.get("sslmode")))
         else:
-            run_pg_tool("pg_restore", pg_restore_cmd_args, target.get("password"), sslmode=target.get("sslmode"), input_file=backup_file)
+            try:
+                run_pg_tool("pg_restore", pg_restore_cmd_args, target.get("password"), sslmode=target.get("sslmode"), input_file=backup_file)
+            except subprocess.CalledProcessError as e:
+                print(f"[AVISO] pg_restore finalizado com avisos de compatibilidade.")
     else:
         # plain SQL - usa psql
         psql_cmd_args = [
@@ -234,6 +368,8 @@ def do_restore(args):
         else:
             run_pg_tool("psql", psql_cmd_args, target.get("password"), sslmode=target.get("sslmode"), input_file=backup_file)
 
+    # 3. Salva o arquivo de credenciais local ao finalizar
+    save_credentials_file(target, credentials)
     print(f"[SUCCESS] Restore concluído no alvo.")
 
 

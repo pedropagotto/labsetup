@@ -57,8 +57,11 @@ class TestPgBackupRestore(unittest.TestCase):
             output_file="/tmp/test.dump"
         )
 
+    @patch("pg_backup_restore.save_credentials_file")
+    @patch("pg_backup_restore.ensure_roles_exist_on_target", return_value={"readonly_user": "randompass123"})
+    @patch("pg_backup_restore.extract_roles_from_dump", return_value={"readonly_user"})
     @patch("pg_backup_restore.run_pg_tool")
-    def test_do_restore_local_type_valid(self, mock_run_pg_tool):
+    def test_do_restore_local_type_valid(self, mock_run_pg_tool, mock_extract, mock_ensure, mock_save):
         args = MagicMock()
         args.target = {
             "type": "local",
@@ -74,13 +77,16 @@ class TestPgBackupRestore(unittest.TestCase):
 
         pg_backup_restore.do_restore(args)
 
+        mock_extract.assert_called_once_with("/tmp/test.dump", "custom")
+        mock_ensure.assert_called_once_with(args.target, {"readonly_user"})
         mock_run_pg_tool.assert_called_once_with(
             "pg_restore",
-            ["-U", "myuser", "-h", "vps.hostinger.com", "-p", "5432", "-d", "mydb", "-v", "--clean", "--if-exists"],
+            ["-U", "myuser", "-h", "vps.hostinger.com", "-p", "5432", "-d", "mydb", "-v", "--clean", "--if-exists", "--no-owner"],
             "secretpass",
             sslmode="prefer",
             input_file="/tmp/test.dump"
         )
+        mock_save.assert_called_once_with(args.target, {"readonly_user": "randompass123"})
 
 
 class TestKamalSSLConfig(unittest.TestCase):
