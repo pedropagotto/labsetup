@@ -88,8 +88,35 @@ class TestPgBackupRestore(unittest.TestCase):
         )
         mock_save.assert_called_once_with(args.target, {"readonly_user": "randompass123"})
 
+    @patch("pg_backup_restore.run_pg_tool")
+    @patch("getpass.getpass", return_value="adminpass")
+    @patch("builtins.input")
+    def test_create_pg_user_readonly(self, mock_input, mock_getpass, mock_run_pg_tool):
+        # Simula as respostas do usuário: host, port, admin_user, ssl_choice, target_db, new_username, role_choice
+        mock_input.side_effect = [
+            "localhost", "5432", "postgres", "3", "meu_banco", "leitor_app", "2"
+        ]
 
-class TestKamalSSLConfig(unittest.TestCase):
+        success = pg_backup_restore.create_pg_user()
+        self.assertTrue(success)
+
+        # Verifica se o psql foi chamado 2 vezes (1 para criar a role e 1 para atribuir GRANTs)
+        self.assertEqual(mock_run_pg_tool.call_count, 2)
+
+    @patch("pg_backup_restore.run_pg_tool")
+    @patch("getpass.getpass", return_value="adminpass")
+    @patch("builtins.input")
+    def test_reset_pg_user_password(self, mock_input, mock_getpass, mock_run_pg_tool):
+        # Simula as respostas do usuário: host, port, admin_user, ssl_choice, target_user, opt_pwd
+        mock_input.side_effect = [
+            "localhost", "5432", "postgres", "3", "usuario_teste", "1"
+        ]
+
+        success = pg_backup_restore.reset_pg_user_password()
+        self.assertTrue(success)
+
+        # Verifica se o psql foi chamado 1 vez para redefinir a senha
+        mock_run_pg_tool.assert_called_once()
 
     def test_generate_kamal1_config(self):
         content = kamal_ssl_config.generate_kamal1_config(

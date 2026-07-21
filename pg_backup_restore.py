@@ -138,6 +138,266 @@ def save_credentials_file(target, credentials, filename="restore_credentials.txt
         print(f"[ERRO] Falha ao salvar arquivo de credenciais: {e}")
 
 
+def create_pg_user(conn_info=None, target_db=None, username=None, role_type=None):
+    """Cria um novo usuário no PostgreSQL com privilégios específicos (Owner, Readonly, Writer)."""
+    print("\n" + "=" * 60)
+    print("CRIAÇÃO DE NOVO USUÁRIO POSTGRESQL")
+    print("=" * 60)
+
+    # 1. Solicita conexões se não fornecidas
+    if not conn_info:
+        print("Digite os dados de conexão do administrador/superusuário:")
+        host = input("1- Host/IP: ").strip() or "localhost"
+        port_str = input("2- Porta (padrão 5432): ").strip() or "5432"
+        try:
+            port = int(port_str)
+        except ValueError:
+            port = 5432
+        user = input("3- Usuário admin (padrão postgres): ").strip() or "postgres"
+        password = getpass.getpass("4- Senha admin: ")
+
+        print("5- Usar SSL / Criptografia no PostgreSQL?")
+        print("   [1] Sim (Exigido / RDS Aurora / Cloud - sslmode=require)")
+        print("   [2] Não (Desativado - sslmode=disable)")
+        print("   [3] Opcional (Preferencial - sslmode=prefer)")
+        default_opt = "1" if "rds.amazonaws.com" in host else "3"
+        ssl_choice = input(f"   Escolha uma opção [1-3] (padrão: {default_opt}): ").strip() or default_opt
+
+        if ssl_choice == "1":
+            sslmode = "require"
+        elif ssl_choice == "2":
+            sslmode = "disable"
+        else:
+            sslmode = "prefer"
+
+        conn_info = {
+            "type": "local",
+            "host": host,
+            "port": port,
+            "user": user,
+            "password": password if password else None,
+            "sslmode": sslmode
+        }
+
+    # 3. Solicita banco de dados
+    if not target_db:
+        target_db = input("\nNome do banco de dados alvo para conceder privilégios: ").strip()
+        while not target_db:
+            print("[ERRO] O nome do banco de dados é obrigatório.")
+            target_db = input("Nome do banco de dados alvo: ").strip()
+
+    # 4. Solicita nome do usuário
+    if not username:
+        username = input("Nome do novo usuário a ser criado: ").strip()
+        while not username:
+            print("[ERRO] O nome do usuário é obrigatório.")
+            username = input("Nome do novo usuário: ").strip()
+
+    # 2. Solicita papel do usuário
+    if not role_type:
+        print(f"\nEscolha o papel (permissões) para o usuário '{username}' no banco '{target_db}':")
+        print("  1. Owner    (Acesso total ao banco de dados e proprietário)")
+        print("  2. Readonly (Somente leitura - SELECT em tabelas e sequências)")
+        print("  3. Writer   (Leitura + Escrita + DDL para criar tabelas/índices; sem DROP de schema/db e sem criar usuários)")
+        
+        escolha = input("Escolha uma opção [1-3]: ").strip()
+        while escolha not in ["1", "2", "3"]:
+            print("[ERRO] Opção inválida.")
+            escolha = input("Escolha uma opção [1-3]: ").strip()
+        
+        role_type = "owner" if escolha == "1" else ("readonly" if escolha == "2" else "writer")
+
+    # 8. Gera senha aleatória
+    new_password = generate_random_password(16)
+
+    # 5, 6, 7. Monta e executa os scripts SQL conforme a role
+    # Primeiro garante que a role/usuário existe
+    sql_create_user = f"""
+    DO $$
+    BEGIN
+        IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = '{username}') THEN
+            CREATE ROLE "{username}" WITH LOGIN PASSWORD '{new_password}' NOSUPERUSER NOCREATEDB NOCREATEROLE;
+        ELSE
+            ALTER ROLE "{username}" WITH LOGIN PASSWORD '{new_password}' NOSUPERUSER NOCREATEDB NOCREATEROLE;
+        END IF;
+    END
+    $$;
+    """
+
+    psql_create_cmd = [
+        "-U", conn_info["user"],
+        "-h", conn_info.get("host", "localhost"),
+        "-p", str(conn_info.get("port", 5432)),
+        "-d", "postgres",
+        "-c", sql_create_user
+    ]
+
+    try:
+        run_pg_tool("psql", psql_create_cmd, password=conn_info.get("password"), sslmode=conn_info.get("sslmode"))
+    except Exception as e:
+        print(f"[ERRO] Falha ao criar a role '{username}': {e}")
+        return False
+
+    # Concede privilégios específicos dentro do banco de dados alvo
+    sql_grant = ""
+    if role_type == "owner":
+        # 5. Owner do banco de dados - pode fazer tudo
+        sql_grant = f"""
+        GRANT ALL PRIVILEGES ON DATABASE "{target_db}" TO "{username}";
+        ALTER DATABASE "{target_db}" OWNER TO "{username}";
+        GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO "{username}";
+        GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public TO "{username}";
+        GRANT ALL PRIVILEGES ON ALL FUNCTIONS IN SCHEMA public TO "{username}";
+        GRANT ALL ON SCHEMA public TO "{username}";
+        ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO "{username}";
+        ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON SEQUENCES TO "{username}";
+        """
+    elif role_type == "readonly":
+        # 6. Readonly - somente leitura
+        sql_grant = f"""
+        GRANT CONNECT ON DATABASE "{target_db}" TO "{username}";
+        GRANT USAGE ON SCHEMA public TO "{username}";
+        GRANT SELECT ON ALL TABLES IN SCHEMA public TO "{username}";
+        GRANT SELECT ON ALL SEQUENCES IN SCHEMA public TO "{username}";
+        ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO "{username}";
+        ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON SEQUENCES TO "{username}";
+        """
+    elif role_type == "writer":
+        # 7. Writer - leitura + escrita + DDL no schema public (criar tabelas), sem DROP de schema/db e sem CREATEROLE
+        sql_grant = f"""
+        GRANT CONNECT ON DATABASE "{target_db}" TO "{username}";
+        GRANT USAGE, CREATE ON SCHEMA public TO "{username}";
+        GRANT SELECT, INSERT, UPDATE, DELETE, REFERENCES, TRIGGER ON ALL TABLES IN SCHEMA public TO "{username}";
+        GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public TO "{username}";
+        ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO "{username}";
+        ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON SEQUENCES TO "{username}";
+        REVOKE DROP ON SCHEMA public FROM "{username}";
+        """
+
+    psql_grant_cmd = [
+        "-U", conn_info["user"],
+        "-h", conn_info.get("host", "localhost"),
+        "-p", str(conn_info.get("port", 5432)),
+        "-d", target_db,
+        "-c", sql_grant
+    ]
+
+    try:
+        run_pg_tool("psql", psql_grant_cmd, password=conn_info.get("password"), sslmode=conn_info.get("sslmode"))
+    except Exception as e:
+        print(f"[ERRO] Falha ao atribuir privilégios para '{username}': {e}")
+        return False
+
+    # 8. Print no terminal no final
+    print("\n" + "=" * 60)
+    print("[SUCCESS] USUÁRIO CRIADO E CONFIGURADO COM SUCESSO!")
+    print("=" * 60)
+    print(f"  Host:            {conn_info.get('host')}")
+    print(f"  Porta:           {conn_info.get('port')}")
+    print(f"  Banco de Dados:  {target_db}")
+    print(f"  Usuário Criado:  {username}")
+    print(f"  Senha Gerada:    {new_password}")
+    print(f"  Papel/Permissão: {role_type.upper()}")
+    print("=" * 60 + "\n")
+    return True
+
+
+def reset_pg_user_password(conn_info=None, target_user=None, new_password=None):
+    """Redefine a senha de qualquer usuário existente no PostgreSQL."""
+    print("\n" + "=" * 60)
+    print("REDEFINIÇÃO DE SENHA DE USUÁRIO POSTGRESQL")
+    print("=" * 60)
+
+    # Solicita conexões admin se não fornecidas
+    if not conn_info:
+        print("Digite os dados de conexão do administrador/superusuário:")
+        host = input("1- Host/IP: ").strip() or "localhost"
+        port_str = input("2- Porta (padrão 5432): ").strip() or "5432"
+        try:
+            port = int(port_str)
+        except ValueError:
+            port = 5432
+        user = input("3- Usuário admin (padrão postgres): ").strip() or "postgres"
+        password = getpass.getpass("4- Senha admin: ")
+
+        print("5- Usar SSL / Criptografia no PostgreSQL?")
+        print("   [1] Sim (Exigido / RDS Aurora / Cloud - sslmode=require)")
+        print("   [2] Não (Desativado - sslmode=disable)")
+        print("   [3] Opcional (Preferencial - sslmode=prefer)")
+        default_opt = "1" if "rds.amazonaws.com" in host else "3"
+        ssl_choice = input(f"   Escolha uma opção [1-3] (padrão: {default_opt}): ").strip() or default_opt
+
+        if ssl_choice == "1":
+            sslmode = "require"
+        elif ssl_choice == "2":
+            sslmode = "disable"
+        else:
+            sslmode = "prefer"
+
+        conn_info = {
+            "type": "local",
+            "host": host,
+            "port": port,
+            "user": user,
+            "password": password if password else None,
+            "sslmode": sslmode
+        }
+
+    if not target_user:
+        target_user = input("\nNome do usuário PostgreSQL que terá a senha redefinida: ").strip()
+        while not target_user:
+            print("[ERRO] O nome do usuário é obrigatório.")
+            target_user = input("Nome do usuário: ").strip()
+
+    if not new_password:
+        opt_pwd = input("Deseja digitar a nova senha ou gerar aleatoriamente? [1=Gerar Aleatória, 2=Digitar Manualmente] (padrão 1): ").strip() or "1"
+        if opt_pwd == "2":
+            new_password = getpass.getpass("Digite a nova senha: ")
+            while not new_password:
+                print("[ERRO] Senha não pode ser vazia.")
+                new_password = getpass.getpass("Digite a nova senha: ")
+        else:
+            new_password = generate_random_password(16)
+
+    # Executa o ALTER ROLE no banco
+    sql_reset = f"""
+    DO $$
+    BEGIN
+        IF EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = '{target_user}') THEN
+            ALTER ROLE "{target_user}" WITH PASSWORD '{new_password}';
+            RAISE NOTICE 'Senha do usuário {target_user} redefinida com sucesso.';
+        ELSE
+            RAISE EXCEPTION 'O usuário {target_user} não existe no PostgreSQL.';
+        END IF;
+    END
+    $$;
+    """
+
+    psql_reset_cmd = [
+        "-U", conn_info["user"],
+        "-h", conn_info.get("host", "localhost"),
+        "-p", str(conn_info.get("port", 5432)),
+        "-d", "postgres",
+        "-c", sql_reset
+    ]
+
+    try:
+        run_pg_tool("psql", psql_reset_cmd, password=conn_info.get("password"), sslmode=conn_info.get("sslmode"))
+    except Exception as e:
+        print(f"[ERRO] Falha ao redefinir a senha do usuário '{target_user}': {e}")
+        return False
+
+    print("\n" + "=" * 60)
+    print("[SUCCESS] SENHA REDEFINIDA COM SUCESSO!")
+    print("=" * 60)
+    print(f"  Host:           {conn_info.get('host')}")
+    print(f"  Porta:          {conn_info.get('port')}")
+    print(f"  Usuário:        {target_user}")
+    print(f"  Nova Senha:     {new_password}")
+    print("=" * 60 + "\n")
+    return True
+
+
 def run_command(cmd, env=None, check=True, capture_output=False):
     """Executa comando shell de forma segura."""
     print(f"[INFO] Executando: {' '.join(cmd)}")
@@ -420,20 +680,22 @@ def parse_connection_args(prefix, args_dict):
 
 def run_interactive():
     print("=" * 60)
-    print("DATABASE PG - MIGRAÇÃO E BACKUP INTERATIVO")
+    print("DATABASE PG - MIGRAÇÃO, BACKUP E GERENCIAMENTO DE USUÁRIOS")
     print("=" * 60)
-    print("Escolha o método de cópia/migração:")
+    print("Escolha o método/operação:")
     print("  1. Backup de Servidor Remoto/Físico para Arquivo Local + Restore (2 etapas)")
     print("  2. Backup + Restore Direto entre Servidores (Físicos, RDS/Aurora, VPS, etc.)")
     print("  3. Migração envolvendo Docker Container")
+    print("  4. Criar usuário com permissões (Owner, Readonly, Writer)")
+    print("  5. Redefinir senha de usuário PostgreSQL")
     print("=" * 60)
     try:
-        escolha = input("Escolha uma opção [1-3]: ").strip()
+        escolha = input("Escolha uma opção [1-5]: ").strip()
     except (EOFError, KeyboardInterrupt):
         print("\n[INFO] Operação cancelada.")
         sys.exit(0)
 
-    if escolha not in ["1", "2", "3"]:
+    if escolha not in ["1", "2", "3", "4", "5"]:
         print("[ERRO] Opção inválida.")
         sys.exit(1)
 
@@ -447,7 +709,7 @@ def run_interactive():
         db = input("Nome do banco de dados: ").strip()
         while not db:
             print("[ERRO] Nome do banco de dados é obrigatório.")
-            db = input("Nome do banco de dados: ").strip()
+            db = input("Nome do banco de dados é obrigatório.")
             
         user = input("Usuário (padrão: postgres): ").strip() or "postgres"
         password = getpass.getpass("Senha: ")
@@ -500,6 +762,14 @@ def run_interactive():
 
         args.command = "backup-restore"
         args.func = do_backup_restore
+
+    elif escolha == "4":
+        args.command = "create-user"
+        args.func = lambda x: create_pg_user()
+
+    elif escolha == "5":
+        args.command = "reset-user-password"
+        args.func = lambda x: reset_pg_user_password()
 
     return args
 

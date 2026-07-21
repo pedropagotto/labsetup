@@ -40,7 +40,9 @@ def print_menu():
     print("  5. Instalar Portainer CE (Debian/Ubuntu)")
     print("  6. Instalação Completa All-in-One (PostgreSQL + Docker + Kamal + Portainer)")
     print("  7. Configurar SSL Let's Encrypt no Kamal (Compartilhável)")
-    print("  8. Recuperar / Resetar senhas de usuários PostgreSQL")
+    print("  8. Recuperar / Resetar senhas locais de usuários PostgreSQL (via sudo/peer)")
+    print("  9. Criar novo usuário PostgreSQL (Owner, Readonly, Writer)")
+    print(" 10. Redefinir senha de um usuário PostgreSQL (Remoto / RDS / Bare-metal)")
     print("  0. Sair")
     print("=" * 60)
 
@@ -63,6 +65,32 @@ def run_backup_restore(extra_args=None):
     except KeyboardInterrupt:
         print("\n[INFO] Operação interrompida pelo usuário.")
         return False
+
+
+def run_create_user(extra_args=None):
+    """Executa o script de criação de usuários no PostgreSQL."""
+    script_path = Path(__file__).parent / "pg_backup_restore.py"
+    if not script_path.exists():
+        print("[ERRO] pg_backup_restore.py não encontrado!")
+        return False
+
+    print("\n[INFO] Iniciando ferramenta de Criação de Usuários PostgreSQL...\n")
+
+    import pg_backup_restore
+    return pg_backup_restore.create_pg_user()
+
+
+def run_reset_user_password(extra_args=None):
+    """Executa o script de redefinição de senha de usuários do PostgreSQL (Remoto / Físico / Cloud)."""
+    script_path = Path(__file__).parent / "pg_backup_restore.py"
+    if not script_path.exists():
+        print("[ERRO] pg_backup_restore.py não encontrado!")
+        return False
+
+    print("\n[INFO] Iniciando ferramenta de Redefinição de Senha de Usuários...\n")
+
+    import pg_backup_restore
+    return pg_backup_restore.reset_pg_user_password()
 
 
 def run_install(extra_args=None):
@@ -287,7 +315,7 @@ def main():
     while True:
         print_menu()
         try:
-            choice = input("Digite sua escolha [0-7]: ").strip()
+            choice = input("Digite sua escolha [0-10]: ").strip()
         except (EOFError, KeyboardInterrupt):
             print("\nSaindo...")
             break
@@ -308,6 +336,10 @@ def main():
             run_kamal_ssl_config()
         elif choice == "8":
             run_reset_passwords()
+        elif choice == "9":
+            run_create_user()
+        elif choice == "10":
+            run_reset_user_password()
         elif choice == "0":
             print("Saindo da ferramenta principal. Até logo!")
             break
