@@ -28,12 +28,14 @@ python3 pg_main.py
 Se preferir, utilize os comandos simplificados via `make` para agilizar a execução de tarefas comuns:
 - `make start` : Inicia o menu interativo (`pg_main.py`).
 - `make install-postgres` : Executa o instalador do PostgreSQL (requer sudo).
+- `make install-mssql` : Executa o instalador do SQL Server (Ubuntu nativo ou Docker).
 - `make install-docker` : Executa o instalador do Docker CE (requer sudo).
 - `make install-kamal` : Executa o instalador do Kamal (requer sudo).
 - `make install-portainer` : Executa o instalador do Portainer CE (requer sudo).
 - `make config-kamal-ssl` : Gera templates de configuração de SSL Let's Encrypt para o Kamal.
 - `make install-all` : Executa o instalador All-in-One completo (requer sudo).
-- `make backup-restore` : Executa a ferramenta de Backup/Restore.
+- `make backup-restore` : Executa a ferramenta de Backup/Restore PostgreSQL.
+- `make mssql-backup-restore` : Executa a ferramenta de Backup/Restore SQL Server / Azure SQL.
 - `make help` : Exibe a lista de comandos do Makefile disponíveis.
 
 ### Menu Interativo:
@@ -44,12 +46,16 @@ Se preferir, utilize os comandos simplificados via `make` para agilizar a execu�
 - `5` → **Instalar Portainer CE** de forma otimizada (`portainer_install.py`)
 - `6` → **Instalação Completa All-in-One (AIO)**: Instala e configura Docker, Kamal, Portainer CE e PostgreSQL sequencialmente, realizando testes de conexão e sugerindo reinicialização ao final.
 - `7` → **Configurar SSL Let's Encrypt no Kamal** (`kamal_ssl_config.py`): Gera de forma interativa configurações de SSL compartilháveis para Kamal 1 e Kamal 2.
+- `7` (Menu Principal) → **Gerenciamento & Operações SQL Server / Azure SQL** (`mssql_backup_restore.py` e `mssql_install.py`): Backup/Restore (`.bacpac` e `.bak`), criação de usuários (`Owner`, `Readonly`, `Writer`), redefinição remota de senha, instalação e reset local do `sa`.
 - `0` → **Sair**
 
 ### Atalhos via Linha de Comando (CLI):
 Para facilitar a automação em servidores limpos (bare-metal ou VPS), você pode chamar as rotinas diretamente passando argumentos:
 - `--all` / `--install-all` / `-aio` : Executa o assistente de instalação completo All-in-One.
 - `--postgres` / `--install-postgres` : Executa diretamente o instalador do PostgreSQL.
+- `--mssql` / `--install-mssql` : Executa diretamente o instalador do SQL Server.
+- `--mssql-backup-restore` : Executa diretamente a ferramenta de Backup/Restore e Usuários para SQL Server / Azure SQL.
+- `--mssql-reset-passwords` : Executa o reset local da senha `sa` do SQL Server via `mssql-conf`.
 - `--docker` / `--install-docker` : Executa diretamente o instalador do Docker.
 - `--kamal` / `--install-kamal` : Executa diretamente o instalador do Kamal.
 - `--portainer` / `--install-portainer` : Executa diretamente o instalador do Portainer CE.
