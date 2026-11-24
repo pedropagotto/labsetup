@@ -289,3 +289,212 @@ def convert_function_to_pg(routine, naming="lowercase"):
         f"AS $$\nBEGIN\n{pg_body}\nEND;\n$$;"
     )
     return sql, warnings
+
+
+def _transpile_plpgsql_block(body, name_map, naming="lowercase"):
+    """Converte o corpo T-SQL de uma Procedure/Trigger para bloco PL/pgSQL."""
+    text = body.strip()
+
+    # Remove diretivas de sessão T-SQL sem equivalente necessário
+    text = re.sub(r"(?im)^\s*SET\s+(?:NOCOUNT|XACT_ABORT|ANSI_NULLS|QUOTED_IDENTIFIER)\s+(?:ON|OFF)\s*;?\s*$", "", text)
+
+    # Extrai DECLARE @var TYPE [= val]
+    decl_lines = []
+    var_map = dict(name_map)
+
+    def _extract_declare(m):
+        var_name = m.group(1)
+        rest = m.group(2).strip().rstrip(";")
+        default_part = ""
+        if "=" in rest:
+            type_part, val_part = rest.split("=", 1)
+            pg_val = transpile_tsql_expressions(val_part.strip(), naming=naming)
+            default_part = f" := {pg_val}"
+        else:
+            type_part = rest
+        pg_var = f"v_{mssql_to_pg_ddl.format_identifier(var_name, naming=naming)}"
+        var_map[f"@{var_name}"] = pg_var
+        pg_type = _map_param_type(type_part)
+        decl_lines.append(f"    {pg_var} {pg_type}{default_part};")
+        return ""
+
+    text = re.sub(
+        r"(?im)^\s*DECLARE\s+@([a-zA-Z_][a-zA-Z0-9_]*)\s+(?!CURSOR\b)([^\r\n;]+);?",
+        _extract_declare,
+        text,
+    )
+
+    # Substitui parâmetros e variáveis locais (@x -> p_x / v_x)
+    for old_v, new_v in sorted(var_map.items(), key=lambda x: len(x[0]), reverse=True):
+        text = re.sub(rf"(?<![a-zA-Z0-9_]){re.escape(old_v)}\b", new_v, text, flags=re.IGNORECASE)
+
+    # SET var = expr -> var := expr
+    text = re.sub(r"(?im)^(\s*)SET\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*=", r"\1\2 :=", text)
+
+    # TRY / CATCH -> BEGIN / EXCEPTION WHEN OTHERS THEN
+    text = re.sub(r"(?is)\bBEGIN\s+TRY\b", "BEGIN", text)
+    text = re.sub(r"(?is)\bEND\s+TRY\s+BEGIN\s+CATCH\b", "EXCEPTION WHEN OTHERS THEN", text)
+    text = re.sub(r"(?is)\bEND\s+CATCH\b", "END;", text)
+
+    # IF ... BEGIN ... END ELSE BEGIN ... END
+    text = re.sub(r"(?is)\bIF\s+(.*?)\s+BEGIN\b", r"IF \1 THEN", text)
+    text = re.sub(r"(?is)\bEND\s+ELSE\s+BEGIN\b", "ELSE", text)
+    text = re.sub(r"(?is)\bWHILE\s+(.*?)\s+BEGIN\b", r"WHILE \1 LOOP", text)
+
+    # RAISERROR / THROW / PRINT
+    text = re.sub(
+        r"(?is)\bTHROW\s+\d+\s*,\s*(N?'[^']*'|[^,;]+)\s*,\s*\d+\s*;?",
+        r"RAISE EXCEPTION '%', \1;",
+        text,
+    )
+    text = re.sub(
+        r"(?is)\bRAISERROR\s*\(\s*(N?'[^']*'|[^,)]+)[^)]*\)\s*;?",
+        r"RAISE EXCEPTION '%', \1;",
+        text,
+    )
+    text = re.sub(r"(?im)^\s*PRINT\s+([^\r\n;]+);?", r"RAISE NOTICE '%', \1;", text)
+
+    # Transpila expressões T-SQL restantes
+    text = transpile_tsql_expressions(text, naming=naming)
+
+    # Limpa END soltos de blocos IF/WHILE -> END IF / END LOOP heurístico simples
+    lines = [line for line in text.splitlines() if line.strip()]
+    formatted_body = "\n".join(f"    {line.strip()}" for line in lines)
+    return decl_lines, formatted_body
+
+
+def convert_procedure_to_pg(routine, naming="lowercase"):
+    """Converte uma Stored Procedure T-SQL para CREATE OR REPLACE PROCEDURE no PostgreSQL."""
+    q_name = mssql_to_pg_ddl.format_qualified_table(routine.schema, routine.name, naming=naming)
+    warnings = [f"PROCEDURE {q_name}: {w}" for w in detect_complex_constructs(routine.definition)]
+
+    m = re.search(
+        r"(?is)\bCREATE\s+(?:OR\s+ALTER\s+)?PROC(?:EDURE)?\s+[^\s(]+(?:\s*\((.*?)\)|\s+(.*?))?\s+AS\s+(.*)$",
+        routine.definition.strip(),
+    )
+    if not m:
+        warnings.append(f"PROCEDURE {q_name}: assinatura não reconhecida automaticamente (revisar manualmente).")
+        commented = "\n".join(f"-- {line}" for line in routine.definition.splitlines())
+        return f"-- TODO: [REVISAR] PROCEDURE {q_name}\n{commented}", warnings
+
+    raw_params = (m.group(1) or m.group(2) or "").strip()
+    raw_body = m.group(3).strip()
+    raw_body = re.sub(r"(?is)^\s*BEGIN\b", "", raw_body)
+    raw_body = re.sub(r"(?is)\bEND\s*;?\s*$", "", raw_body).strip()
+
+    params_list, name_map = _parse_tsql_params(raw_params, naming=naming)
+    decl_lines, pg_body = _transpile_plpgsql_block(raw_body, name_map, naming=naming)
+
+    # Detecta SELECT que retorna resultset diretamente
+    if re.search(r"(?im)^\s*SELECT\s+(?!@)", raw_body) and not re.search(r"(?is)\bINSERT\s+INTO\b.*\bSELECT\b", raw_body):
+        warnings.append(
+            f"PROCEDURE {q_name}: contém SELECT de retorno de resultset; considere converter para FUNCTION RETURNS TABLE / REFCURSOR."
+        )
+
+    decl_section = ""
+    if decl_lines:
+        decl_section = "DECLARE\n" + "\n".join(decl_lines) + "\n"
+
+    todo_prefix = "".join(f"-- TODO: [REVISAR] {w}\n" for w in warnings)
+    sql = (
+        f"{todo_prefix}CREATE OR REPLACE PROCEDURE {q_name}({', '.join(params_list)})\n"
+        f"LANGUAGE plpgsql\n"
+        f"AS $$\n{decl_section}BEGIN\n{pg_body}\nEND;\n$$;"
+    )
+    return sql, warnings
+
+
+def convert_trigger_to_pg(routine, naming="lowercase"):
+    """Converte uma Trigger T-SQL para Trigger Function + CREATE TRIGGER no PostgreSQL."""
+    q_name = mssql_to_pg_ddl.format_qualified_table(routine.schema, routine.name, naming=naming)
+    pg_trg_name = mssql_to_pg_ddl.format_identifier(routine.name, naming=naming)
+    pg_schema = mssql_to_pg_ddl.map_schema_name(routine.schema, naming=naming)
+    fn_name = f"{pg_schema}.trg_fn_{pg_trg_name}"
+    warnings = [f"TRIGGER {q_name}: {w}" for w in detect_complex_constructs(routine.definition)]
+
+    m = re.search(
+        r"(?is)\bCREATE\s+(?:OR\s+ALTER\s+)?TRIGGER\s+[^\s]+\s+ON\s+([^\s(]+)\s+(AFTER|FOR|INSTEAD\s+OF)\s+([A-Z,\s]+?)\s+AS\s+(.*)$",
+        routine.definition.strip(),
+    )
+
+    parent_sch = routine.parent_schema or routine.schema
+    parent_tbl = routine.parent_table or ""
+    timing = routine.trigger_timing or "AFTER"
+    events = list(routine.trigger_events or [])
+    raw_body = routine.definition
+
+    if m:
+        p_sch, p_tbl = mssql_to_pg_ddl._parse_qualified_name(m.group(1))
+        parent_sch = parent_sch or p_sch
+        parent_tbl = parent_tbl or p_tbl
+        raw_timing = re.sub(r"\s+", " ", m.group(2).strip().upper())
+        timing = "INSTEAD OF" if raw_timing == "INSTEAD OF" else "AFTER"
+        if not events:
+            events = [ev.strip().upper() for ev in m.group(3).split(",") if ev.strip()]
+        raw_body = m.group(4).strip()
+
+    raw_body = re.sub(r"(?is)^\s*BEGIN\b", "", raw_body)
+    raw_body = re.sub(r"(?is)\bEND\s*;?\s*$", "", raw_body).strip()
+
+    if re.search(r"(?is)\bFROM\s+(?:INSERTED|DELETED)\b|\bJOIN\s+(?:INSERTED|DELETED)\b", raw_body):
+        warnings.append(
+            f"TRIGGER {q_name}: usa INSERTED/DELETED em consulta set-based (FROM/JOIN); adapte para registros NEW/OLD por linha."
+        )
+
+    body_replaced = re.sub(r"(?is)\bINSERTED\b", "NEW", raw_body)
+    body_replaced = re.sub(r"(?is)\bDELETED\b", "OLD", body_replaced)
+    decl_lines, pg_body = _transpile_plpgsql_block(body_replaced, {}, naming=naming)
+
+    decl_section = ""
+    if decl_lines:
+        decl_section = "DECLARE\n" + "\n".join(decl_lines) + "\n"
+
+    q_parent = mssql_to_pg_ddl.format_qualified_table(parent_sch, parent_tbl, naming=naming) if parent_tbl else "-- TODO: informar_tabela"
+    events_sql = " OR ".join(events) if events else "INSERT OR UPDATE OR DELETE"
+    ret_stmt = "    RETURN OLD;" if events == ["DELETE"] else "    RETURN NEW;"
+
+    todo_prefix = "".join(f"-- TODO: [REVISAR] {w}\n" for w in warnings)
+    sql = (
+        f"{todo_prefix}CREATE OR REPLACE FUNCTION {fn_name}()\n"
+        f"RETURNS TRIGGER\n"
+        f"LANGUAGE plpgsql\n"
+        f"AS $$\n{decl_section}BEGIN\n{pg_body}\n{ret_stmt}\nEND;\n$$;\n\n"
+        f"CREATE TRIGGER {pg_trg_name}\n"
+        f"    {timing} {events_sql} ON {q_parent}\n"
+        f"    FOR EACH ROW\n"
+        f"    EXECUTE FUNCTION {fn_name}();"
+    )
+    return sql, warnings
+
+
+def generate_routines_sql(routines, naming="lowercase"):
+    """Converte e ordena todas as rotinas (Views -> Functions -> Procedures -> Triggers)."""
+    order_map = {"VIEW": 0, "FUNCTION": 1, "PROCEDURE": 2, "TRIGGER": 3}
+    sorted_routines = sorted(routines, key=lambda r: order_map.get(r.kind.upper(), 99))
+
+    converters = {
+        "VIEW": convert_view_to_pg,
+        "FUNCTION": convert_function_to_pg,
+        "PROCEDURE": convert_procedure_to_pg,
+        "TRIGGER": convert_trigger_to_pg,
+    }
+
+    lines = [
+        "-- ============================================================",
+        "-- ROTINAS CONVERTIDAS: SQL Server / Azure SQL -> PostgreSQL",
+        "-- Ordem: Views -> Functions -> Procedures -> Triggers",
+        "-- ============================================================",
+        "",
+    ]
+    all_warnings = []
+
+    for routine in sorted_routines:
+        converter = converters.get(routine.kind.upper())
+        if not converter:
+            continue
+        sql_block, warns = converter(routine, naming=naming)
+        lines.append(sql_block)
+        lines.append("")
+        all_warnings.extend(warns)
+
+    return "\n".join(lines), all_warnings
