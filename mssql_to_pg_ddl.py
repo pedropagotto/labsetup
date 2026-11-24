@@ -5,12 +5,16 @@ Permite extrair DDL de um banco SQL Server/Azure SQL ativo ou de arquivos .sql/.
 convertendo tipos, defaults, constraints e índices para PostgreSQL.
 """
 
+import argparse
 from dataclasses import dataclass, field
+import getpass
 import re
+import sys
 import zipfile
 from pathlib import Path
 
 import mssql_backup_restore
+import pg_backup_restore
 
 
 @dataclass
@@ -872,3 +876,165 @@ def extract_schema_from_file(file_path):
 
     sql_text = path.read_text(encoding="utf-8", errors="ignore")
     return extract_schema_from_sql(sql_text)
+
+
+def apply_ddl_to_postgres(ddl_file, pg_conn):
+    """Aplica o script DDL convertido em um banco PostgreSQL alvo via psql."""
+    psql_args = [
+        "-U", pg_conn["user"],
+        "-h", pg_conn.get("host", "localhost"),
+        "-p", str(pg_conn.get("port", 5432)),
+        "-d", pg_conn["database"],
+        "-v", "ON_ERROR_STOP=1",
+    ]
+    print(f"\n[INFO] Aplicando DDL '{ddl_file}' no PostgreSQL ({pg_conn.get('host')}:{pg_conn.get('port')}/{pg_conn.get('database')})...")
+    pg_backup_restore.run_pg_tool(
+        "psql",
+        psql_args,
+        password=pg_conn.get("password"),
+        sslmode=pg_conn.get("sslmode"),
+        input_file=str(ddl_file),
+    )
+    print("[SUCCESS] DDL aplicada com sucesso no PostgreSQL!")
+
+
+def convert_ddl(db_schema, output_path, naming="lowercase"):
+    """Gera e salva o script DDL PostgreSQL e exibe resumo da conversão."""
+    ddl_sql, warnings = generate_pg_ddl(db_schema, naming=naming)
+    out_file = Path(output_path)
+    out_file.parent.mkdir(parents=True, exist_ok=True)
+    out_file.write_text(ddl_sql, encoding="utf-8")
+
+    print("\n" + "=" * 60)
+    print("[SUCCESS] CONVERSÃO DDL CONCLUÍDA!")
+    print("=" * 60)
+    print(f"  Tabelas convertidas: {len(db_schema.tables)}")
+    print(f"  Nomenclatura:        {naming}")
+    print(f"  Avisos (TODO):       {len(warnings)}")
+    print(f"  Arquivo gerado:      {out_file.resolve()}")
+    print("=" * 60)
+    if warnings:
+        print("\n[AVISO] Itens para revisão manual (registrados também no final do .sql):")
+        for w in warnings[:10]:
+            print(f"  - {w}")
+        if len(warnings) > 10:
+            print(f"  ... e mais {len(warnings) - 10} aviso(s) no arquivo.")
+    print()
+    return out_file, warnings
+
+
+def run_interactive():
+    """Fluxo interativo de conversão DDL SQL Server / Azure SQL -> PostgreSQL."""
+    print("\n" + "=" * 60)
+    print("CONVERSÃO DE ESTRUTURA DDL: SQL SERVER / AZURE SQL -> POSTGRESQL")
+    print("=" * 60)
+    print("Escolha a origem da estrutura DDL:")
+    print("  1. Banco SQL Server / Azure SQL ativo (extração via sqlcmd)")
+    print("  2. Arquivo local (.sql T-SQL ou .bacpac)")
+    print("=" * 60)
+
+    try:
+        src_choice = input("Escolha uma opção [1-2] (padrão: 1): ").strip() or "1"
+    except (EOFError, KeyboardInterrupt):
+        print("\n[INFO] Operação cancelada.")
+        return False
+
+    if src_choice == "2":
+        file_path = input("Path do arquivo .sql ou .bacpac: ").strip()
+        while not file_path:
+            print("[ERRO] O caminho do arquivo é obrigatório.")
+            file_path = input("Path do arquivo .sql ou .bacpac: ").strip()
+        db_schema = extract_schema_from_file(file_path)
+    else:
+        conn_info = mssql_backup_restore.prompt_connection_details("source")
+        print("\n[INFO] Extraindo metadados DDL do servidor...")
+        db_schema = extract_schema_from_live_db(conn_info)
+
+    print("\nEstratégia de nomenclatura no PostgreSQL:")
+    print("  1. lowercase  (padrão - sem aspas, ex: useraccounts)")
+    print("  2. snake_case (ex: UserAccounts -> user_accounts)")
+    print("  3. preserve   (preserva case original entre aspas duplas)")
+    naming_choice = input("Escolha uma opção [1-3] (padrão: 1): ").strip() or "1"
+    naming_map = {"1": "lowercase", "2": "snake_case", "3": "preserve"}
+    naming = naming_map.get(naming_choice, "lowercase")
+
+    output_path = input("\nPath para salvar o script PostgreSQL (padrão: ./schema_pg.sql): ").strip() or "./schema_pg.sql"
+    out_file, _ = convert_ddl(db_schema, output_path, naming=naming)
+
+    apply_opt = input("Deseja aplicar a DDL convertida agora em um banco PostgreSQL? (s/N): ").strip().lower()
+    if apply_opt in ("s", "sim", "y", "yes"):
+        pg_conn = pg_backup_restore.prompt_connection_details("target")
+        apply_ddl_to_postgres(out_file, pg_conn)
+
+    return True
+
+
+def main():
+    if len(sys.argv) == 1:
+        run_interactive()
+        return
+
+    parser = argparse.ArgumentParser(
+        description="Conversor de estruturas DDL: SQL Server / Azure SQL -> PostgreSQL"
+    )
+    parser.add_argument("--source-file", help="Arquivo local .sql ou .bacpac de origem")
+    parser.add_argument("--source-host", default="localhost")
+    parser.add_argument("--source-port", type=int, default=1433)
+    parser.add_argument("--source-db", help="Banco de origem (se extração live)")
+    parser.add_argument("--source-user", default="sa")
+    parser.add_argument("--source-password", default=None)
+    parser.add_argument("--source-ssl", choices=["require", "trust", "disable"], default=None)
+
+    parser.add_argument("--output", default="./schema_pg.sql", help="Arquivo .sql de saída (padrão: ./schema_pg.sql)")
+    parser.add_argument("--naming", choices=["lowercase", "snake_case", "preserve"], default="lowercase")
+
+    parser.add_argument("--apply", action="store_true", help="Aplica a DDL gerada no PostgreSQL alvo via psql")
+    parser.add_argument("--pg-host", default="localhost")
+    parser.add_argument("--pg-port", type=int, default=5432)
+    parser.add_argument("--pg-db", default=None)
+    parser.add_argument("--pg-user", default="postgres")
+    parser.add_argument("--pg-password", default=None)
+    parser.add_argument("--pg-ssl", choices=["require", "disable", "prefer"], default="prefer")
+
+    args = parser.parse_args()
+
+    if args.source_file:
+        db_schema = extract_schema_from_file(args.source_file)
+    else:
+        if not args.source_db:
+            parser.error("Informe --source-file ou --source-db para extração live.")
+        pwd = args.source_password or getpass.getpass(f"Senha de origem ({args.source_user}@{args.source_host}): ") or None
+        is_az = mssql_backup_restore.is_azure_sql_host(args.source_host)
+        conn_info = {
+            "type": "local",
+            "is_azure": is_az,
+            "host": args.source_host,
+            "port": args.source_port,
+            "database": args.source_db,
+            "user": args.source_user,
+            "password": pwd,
+            "ssl_mode": args.source_ssl or ("require" if is_az else "trust"),
+        }
+        db_schema = extract_schema_from_live_db(conn_info)
+
+    out_file, _ = convert_ddl(db_schema, args.output, naming=args.naming)
+
+    if args.apply:
+        if args.pg_db:
+            pg_pwd = args.pg_password or getpass.getpass(f"Senha PostgreSQL ({args.pg_user}@{args.pg_host}): ") or None
+            pg_conn = {
+                "type": "local",
+                "host": args.pg_host,
+                "port": args.pg_port,
+                "database": args.pg_db,
+                "user": args.pg_user,
+                "password": pg_pwd,
+                "sslmode": args.pg_ssl,
+            }
+        else:
+            pg_conn = pg_backup_restore.prompt_connection_details("target")
+        apply_ddl_to_postgres(out_file, pg_conn)
+
+
+if __name__ == "__main__":
+    main()
