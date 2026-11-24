@@ -36,6 +36,7 @@ Se preferir, utilize os comandos simplificados via `make` para agilizar a execu�
 - `make install-all` : Executa o instalador All-in-One completo (requer sudo).
 - `make backup-restore` : Executa a ferramenta de Backup/Restore PostgreSQL.
 - `make mssql-backup-restore` : Executa a ferramenta de Backup/Restore SQL Server / Azure SQL.
+- `make mssql-to-pg-ddl` : Converte estruturas DDL (SQL Server / Azure SQL → PostgreSQL).
 - `make help` : Exibe a lista de comandos do Makefile disponíveis.
 
 ### Menu Interativo:
@@ -55,6 +56,7 @@ Para facilitar a automação em servidores limpos (bare-metal ou VPS), você pod
 - `--postgres` / `--install-postgres` : Executa diretamente o instalador do PostgreSQL.
 - `--mssql` / `--install-mssql` : Executa diretamente o instalador do SQL Server.
 - `--mssql-backup-restore` : Executa diretamente a ferramenta de Backup/Restore e Usuários para SQL Server / Azure SQL.
+- `--mssql-to-pg-ddl` : Converte estruturas DDL de SQL Server / Azure SQL para PostgreSQL (`mssql_to_pg_ddl.py`).
 - `--mssql-reset-passwords` : Executa o reset local da senha `sa` do SQL Server via `mssql-conf`.
 - `--docker` / `--install-docker` : Executa diretamente o instalador do Docker.
 - `--kamal` / `--install-kamal` : Executa diretamente o instalador do Kamal.
