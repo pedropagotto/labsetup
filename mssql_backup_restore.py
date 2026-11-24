@@ -535,6 +535,220 @@ def _prompt_conn_docker(role):
     }
 
 
+def _prompt_admin_conn():
+    """Solicita dados de conexão do administrador para gerenciamento de usuários/senhas."""
+    print("Digite os dados de conexão do administrador (sa ou Azure SQL admin):")
+    host = input("1- Host/IP (ex: localhost ou servidor.database.windows.net): ").strip() or "localhost"
+    port_str = input("2- Porta (padrão 1433): ").strip() or "1433"
+    try:
+        port = int(port_str)
+    except ValueError:
+        port = 1433
+
+    detected_azure = is_azure_sql_host(host)
+    if detected_azure:
+        is_azure = True
+        print("[INFO] Host Azure SQL detectado automaticamente (.database.windows.net).")
+    else:
+        print("   Tipo de servidor:")
+        print("   [1] SQL Server (On-prem / VPS / Docker - Login no master + User no banco)")
+        print("   [2] Azure SQL Database (Contained User direto no banco)")
+        srv_choice = input("   Escolha uma opção [1-2] (padrão: 1): ").strip() or "1"
+        is_azure = srv_choice == "2"
+
+    default_user = "sqladmin" if is_azure else "sa"
+    user = input(f"3- Usuário admin (padrão {default_user}): ").strip() or default_user
+    password = getpass.getpass("4- Senha admin: ")
+    ssl_mode = prompt_ssl_mode(host)
+
+    return {
+        "type": "local",
+        "is_azure": is_azure,
+        "host": host,
+        "port": port,
+        "user": user,
+        "password": password if password else None,
+        "ssl_mode": ssl_mode,
+    }
+
+
+def _exec_tsql(conn_info, database, query):
+    """Executa uma instrução T-SQL via run_sqlcmd no banco especificado."""
+    sqlcmd_args = [
+        "-S", build_sqlcmd_server(conn_info.get("host", "localhost"), conn_info.get("port", 1433)),
+        "-U", conn_info["user"],
+        "-d", database,
+        *get_sqlcmd_ssl_flags(conn_info.get("ssl_mode", "trust")),
+        "-b",
+        "-Q", query,
+    ]
+    run_sqlcmd(sqlcmd_args, password=conn_info.get("password"))
+
+
+def create_mssql_user(conn_info=None, target_db=None, username=None, role_type=None):
+    """Cria um novo usuário no SQL Server ou Azure SQL com privilégios específicos (Owner, Readonly, Writer)."""
+    print("\n" + "=" * 60)
+    print("CRIAÇÃO DE NOVO USUÁRIO SQL SERVER / AZURE SQL")
+    print("=" * 60)
+
+    if not conn_info:
+        conn_info = _prompt_admin_conn()
+
+    if not target_db:
+        target_db = input("\nNome do banco de dados alvo para conceder privilégios: ").strip()
+        while not target_db:
+            print("[ERRO] O nome do banco de dados é obrigatório.")
+            target_db = input("Nome do banco de dados alvo: ").strip()
+
+    if not username:
+        username = input("Nome do novo usuário a ser criado: ").strip()
+        while not username:
+            print("[ERRO] O nome do usuário é obrigatório.")
+            username = input("Nome do novo usuário: ").strip()
+
+    if not role_type:
+        print(f"\nEscolha o papel (permissões) para o usuário '{username}' no banco '{target_db}':")
+        print("  1. Owner    (db_owner - acesso total ao banco de dados)")
+        print("  2. Readonly (db_datareader - somente leitura)")
+        print("  3. Writer   (db_datareader + db_datawriter + db_ddladmin - leitura, escrita e DDL)")
+        escolha = input("Escolha uma opção [1-3]: ").strip()
+        role_map = {"1": "owner", "2": "readonly", "3": "writer"}
+        while escolha not in role_map:
+            print("[ERRO] Opção inválida.")
+            escolha = input("Escolha uma opção [1-3]: ").strip()
+        role_type = role_map[escolha]
+
+    new_password = generate_random_password(16)
+    esc_user = _escape_tsql_str(username)
+    esc_pwd = _escape_tsql_str(new_password)
+
+    try:
+        if conn_info.get("is_azure"):
+            # Azure SQL Database: Contained Database User direto no banco alvo
+            tsql_user = (
+                f"IF NOT EXISTS (SELECT 1 FROM sys.database_principals WHERE name = N'{esc_user}') "
+                f"CREATE USER [{username}] WITH PASSWORD = N'{esc_pwd}'; "
+                f"ELSE ALTER USER [{username}] WITH PASSWORD = N'{esc_pwd}';"
+            )
+            _exec_tsql(conn_info, target_db, tsql_user)
+        else:
+            # SQL Server: Login no master + User no banco alvo
+            tsql_login = (
+                f"IF NOT EXISTS (SELECT 1 FROM sys.server_principals WHERE name = N'{esc_user}') "
+                f"CREATE LOGIN [{username}] WITH PASSWORD = N'{esc_pwd}', CHECK_POLICY = ON; "
+                f"ELSE ALTER LOGIN [{username}] WITH PASSWORD = N'{esc_pwd}';"
+            )
+            _exec_tsql(conn_info, "master", tsql_login)
+
+            tsql_db_user = (
+                f"IF NOT EXISTS (SELECT 1 FROM sys.database_principals WHERE name = N'{esc_user}') "
+                f"CREATE USER [{username}] FOR LOGIN [{username}];"
+            )
+            _exec_tsql(conn_info, target_db, tsql_db_user)
+    except Exception as e:
+        print(f"[ERRO] Falha ao criar usuário/login '{username}': {e}")
+        return False
+
+    role_sql_map = {
+        "owner": f"ALTER ROLE [db_owner] ADD MEMBER [{username}];",
+        "readonly": f"ALTER ROLE [db_datareader] ADD MEMBER [{username}];",
+        "writer": (
+            f"ALTER ROLE [db_datareader] ADD MEMBER [{username}]; "
+            f"ALTER ROLE [db_datawriter] ADD MEMBER [{username}]; "
+            f"ALTER ROLE [db_ddladmin] ADD MEMBER [{username}];"
+        ),
+    }
+    tsql_grant = role_sql_map.get(role_type)
+    if not tsql_grant:
+        print(f"[ERRO] Papel inválido: {role_type}")
+        return False
+
+    try:
+        _exec_tsql(conn_info, target_db, tsql_grant)
+    except Exception as e:
+        print(f"[ERRO] Falha ao atribuir permissões para '{username}': {e}")
+        return False
+
+    print("\n" + "=" * 60)
+    print("[SUCCESS] USUÁRIO CRIADO E CONFIGURADO COM SUCESSO!")
+    print("=" * 60)
+    print(f"  Modo:            {'Azure SQL (Contained User)' if conn_info.get('is_azure') else 'SQL Server (Login + User)'}")
+    print(f"  Host:            {conn_info.get('host')}")
+    print(f"  Porta:           {conn_info.get('port')}")
+    print(f"  Banco de Dados:  {target_db}")
+    print(f"  Usuário Criado:  {username}")
+    print(f"  Senha Gerada:    {new_password}")
+    print(f"  Papel/Permissão: {role_type.upper()}")
+    print("=" * 60 + "\n")
+    return True
+
+
+def reset_mssql_user_password(conn_info=None, target_db=None, target_user=None, new_password=None):
+    """Redefine a senha de um usuário existente no SQL Server (Login) ou Azure SQL (Contained User)."""
+    print("\n" + "=" * 60)
+    print("REDEFINIÇÃO DE SENHA DE USUÁRIO SQL SERVER / AZURE SQL")
+    print("=" * 60)
+
+    if not conn_info:
+        conn_info = _prompt_admin_conn()
+
+    if conn_info.get("is_azure") and not target_db:
+        target_db = input("\nNome do banco de dados onde o Contained User existe: ").strip()
+        while not target_db:
+            print("[ERRO] O nome do banco de dados é obrigatório para Azure SQL.")
+            target_db = input("Nome do banco de dados: ").strip()
+
+    if not target_user:
+        target_user = input("\nNome do usuário/login que terá a senha redefinida: ").strip()
+        while not target_user:
+            print("[ERRO] O nome do usuário é obrigatório.")
+            target_user = input("Nome do usuário: ").strip()
+
+    if not new_password:
+        opt_pwd = input("Deseja digitar a nova senha ou gerar aleatoriamente? [1=Gerar Aleatória, 2=Digitar Manualmente] (padrão 1): ").strip() or "1"
+        if opt_pwd == "2":
+            new_password = getpass.getpass("Digite a nova senha: ")
+            while not new_password:
+                print("[ERRO] Senha não pode ser vazia.")
+                new_password = getpass.getpass("Digite a nova senha: ")
+        else:
+            new_password = generate_random_password(16)
+
+    esc_user = _escape_tsql_str(target_user)
+    esc_pwd = _escape_tsql_str(new_password)
+
+    try:
+        if conn_info.get("is_azure"):
+            tsql_reset = (
+                f"IF EXISTS (SELECT 1 FROM sys.database_principals WHERE name = N'{esc_user}') "
+                f"ALTER USER [{target_user}] WITH PASSWORD = N'{esc_pwd}'; "
+                f"ELSE THROW 50001, N'Usuário não encontrado no banco.', 1;"
+            )
+            _exec_tsql(conn_info, target_db, tsql_reset)
+        else:
+            tsql_reset = (
+                f"IF EXISTS (SELECT 1 FROM sys.server_principals WHERE name = N'{esc_user}') "
+                f"ALTER LOGIN [{target_user}] WITH PASSWORD = N'{esc_pwd}'; "
+                f"ELSE THROW 50001, N'Login não encontrado no servidor.', 1;"
+            )
+            _exec_tsql(conn_info, "master", tsql_reset)
+    except Exception as e:
+        print(f"[ERRO] Falha ao redefinir a senha de '{target_user}': {e}")
+        return False
+
+    print("\n" + "=" * 60)
+    print("[SUCCESS] SENHA REDEFINIDA COM SUCESSO!")
+    print("=" * 60)
+    print(f"  Host:           {conn_info.get('host')}")
+    print(f"  Porta:          {conn_info.get('port')}")
+    if target_db:
+        print(f"  Banco:          {target_db}")
+    print(f"  Usuário:        {target_user}")
+    print(f"  Nova Senha:     {new_password}")
+    print("=" * 60 + "\n")
+    return True
+
+
 def run_interactive():
     """Menu interativo de operações SQL Server / Azure SQL."""
     print("=" * 60)
@@ -595,11 +809,11 @@ def run_interactive():
 
     def _handle_create_user():
         args.command = "create-user"
-        args.func = lambda x: print("[INFO] Criação de usuário será implementada na próxima etapa.")
+        args.func = lambda x: create_mssql_user()
 
     def _handle_reset_password():
         args.command = "reset-user-password"
-        args.func = lambda x: print("[INFO] Redefinição de senha será implementada na próxima etapa.")
+        args.func = lambda x: reset_mssql_user_password()
 
     handlers = {
         "1": _handle_two_step,
