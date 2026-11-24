@@ -296,7 +296,7 @@ def _transpile_plpgsql_block(body, name_map, naming="lowercase"):
     text = body.strip()
 
     # Remove diretivas de sessão T-SQL sem equivalente necessário
-    text = re.sub(r"(?im)^\s*SET\s+(?:NOCOUNT|XACT_ABORT|ANSI_NULLS|QUOTED_IDENTIFIER)\s+(?:ON|OFF)\s*;?\s*$", "", text)
+    text = re.sub(r"(?is)(?:^|;)\s*SET\s+(?:NOCOUNT|XACT_ABORT|ANSI_NULLS|QUOTED_IDENTIFIER)\s+(?:ON|OFF)\s*;?", "", text)
 
     # Extrai DECLARE @var TYPE [= val]
     decl_lines = []
@@ -319,7 +319,7 @@ def _transpile_plpgsql_block(body, name_map, naming="lowercase"):
         return ""
 
     text = re.sub(
-        r"(?im)^\s*DECLARE\s+@([a-zA-Z_][a-zA-Z0-9_]*)\s+(?!CURSOR\b)([^\r\n;]+);?",
+        r"(?is)(?:^|;)\s*DECLARE\s+@([a-zA-Z_][a-zA-Z0-9_]*)\s+(?!CURSOR\b)([^\r\n;]+);?",
         _extract_declare,
         text,
     )
@@ -329,7 +329,7 @@ def _transpile_plpgsql_block(body, name_map, naming="lowercase"):
         text = re.sub(rf"(?<![a-zA-Z0-9_]){re.escape(old_v)}\b", new_v, text, flags=re.IGNORECASE)
 
     # SET var = expr -> var := expr
-    text = re.sub(r"(?im)^(\s*)SET\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*=", r"\1\2 :=", text)
+    text = re.sub(r"(?is)(^|;|\s)SET\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*=", r"\1\2 :=", text)
 
     # TRY / CATCH -> BEGIN / EXCEPTION WHEN OTHERS THEN
     text = re.sub(r"(?is)\bBEGIN\s+TRY\b", "BEGIN", text)
@@ -386,7 +386,7 @@ def convert_procedure_to_pg(routine, naming="lowercase"):
     decl_lines, pg_body = _transpile_plpgsql_block(raw_body, name_map, naming=naming)
 
     # Detecta SELECT que retorna resultset diretamente
-    if re.search(r"(?im)^\s*SELECT\s+(?!@)", raw_body) and not re.search(r"(?is)\bINSERT\s+INTO\b.*\bSELECT\b", raw_body):
+    if re.search(r"(?is)(?:^|;)\s*SELECT\s+(?!@)", raw_body) and not re.search(r"(?is)\bINSERT\s+INTO\b.*\bSELECT\b", raw_body):
         warnings.append(
             f"PROCEDURE {q_name}: contém SELECT de retorno de resultset; considere converter para FUNCTION RETURNS TABLE / REFCURSOR."
         )
