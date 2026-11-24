@@ -14,6 +14,7 @@ import zipfile
 from pathlib import Path
 
 import mssql_backup_restore
+import mssql_tsql_transpiler
 import pg_backup_restore
 
 
@@ -82,6 +83,7 @@ class DatabaseSchema:
     schemas: list = field(default_factory=list)
     tables: list = field(default_factory=list)
     warnings: list = field(default_factory=list)
+    routines: list = field(default_factory=list)
 
 
 SIMPLE_TYPE_MAP = {
@@ -417,7 +419,79 @@ def _query_live_rows(conn_info, tsql):
     return rows
 
 
-def extract_schema_from_live_db(conn_info):
+def extract_routines_from_live_db(conn_info):
+    """Extrai definições completas de Views, Functions, Procedures e Triggers via sys.sql_modules."""
+    row_sep = "<<LABSETUP_ROW>>"
+    col_sep = "<<LABSETUP_COL>>"
+    tsql = f"""
+    SET NOCOUNT ON;
+    SELECT
+        CASE o.type
+            WHEN 'V' THEN 'VIEW'
+            WHEN 'P' THEN 'PROCEDURE'
+            WHEN 'TR' THEN 'TRIGGER'
+            ELSE 'FUNCTION'
+        END + '{col_sep}' +
+        s.name + '{col_sep}' +
+        o.name + '{col_sep}' +
+        ISNULL(sp.name, '') + '{col_sep}' +
+        ISNULL(tp.name, '') + '{col_sep}' +
+        ISNULL(CASE WHEN tr.is_instead_of_trigger = 1 THEN 'INSTEAD OF' ELSE 'AFTER' END, '') + '{col_sep}' +
+        ISNULL(STUFF((
+            SELECT ',' + te.type_desc
+            FROM sys.trigger_events te
+            WHERE te.object_id = tr.object_id
+            FOR XML PATH('')
+        ), 1, 1, ''), '') + '{col_sep}' +
+        ISNULL(m.definition, '') + '{row_sep}'
+    FROM sys.sql_modules m
+    JOIN sys.objects o ON m.object_id = o.object_id
+    JOIN sys.schemas s ON o.schema_id = s.schema_id
+    LEFT JOIN sys.triggers tr ON o.object_id = tr.object_id
+    LEFT JOIN sys.tables tp ON tr.parent_id = tp.object_id
+    LEFT JOIN sys.schemas sp ON tp.schema_id = sp.schema_id
+    WHERE o.is_ms_shipped = 0
+      AND o.type IN ('V', 'FN', 'IF', 'TF', 'P', 'TR')
+    ORDER BY o.type, s.name, o.name;
+    """
+    args = [
+        "-S", mssql_backup_restore.build_sqlcmd_server(conn_info.get("host", "localhost"), conn_info.get("port", 1433)),
+        "-U", conn_info["user"],
+        "-d", conn_info["database"],
+        *mssql_backup_restore.get_sqlcmd_ssl_flags(conn_info.get("ssl_mode", "trust")),
+        "-h", "-1",
+        "-W",
+        "-w", "65535",
+        "-b",
+        "-Q", tsql,
+    ]
+    out = mssql_backup_restore.run_sqlcmd(args, password=conn_info.get("password"), capture_output=True) or ""
+    routines = []
+    for raw_row in out.split(row_sep):
+        chunk = raw_row.strip()
+        if not chunk or col_sep not in chunk:
+            continue
+        parts = chunk.split(col_sep, 7)
+        if len(parts) < 8:
+            continue
+        kind, sch, name, p_sch, p_tbl, timing, events_str, definition = parts
+        events = [e.strip().upper() for e in events_str.split(",") if e.strip()]
+        routines.append(
+            mssql_tsql_transpiler.RoutineDef(
+                kind=kind.strip().upper(),
+                schema=sch.strip(),
+                name=name.strip(),
+                definition=definition.strip(),
+                parent_schema=p_sch.strip() or None,
+                parent_table=p_tbl.strip() or None,
+                trigger_timing=timing.strip() or None,
+                trigger_events=events,
+            )
+        )
+    return routines
+
+
+def extract_schema_from_live_db(conn_info, include_routines=False):
     """Extrai tabelas, colunas, constraints, índices e avisos de um SQL Server / Azure SQL ativo."""
     tables_map = {}
     schemas_set = set()
@@ -597,22 +671,27 @@ def extract_schema_from_live_db(conn_info):
         if t_obj:
             t_obj.indexes.append(IndexDef(name=idx_name, columns=cols, is_unique=is_uq, where_clause=where_def))
 
-    # 6. Views, Procedures e Triggers -> avisos TODO
-    extra_sql = """
-    SELECT 'VIEW', s.name + '.' + v.name FROM sys.views v JOIN sys.schemas s ON v.schema_id = s.schema_id WHERE v.is_ms_shipped = 0
-    UNION ALL
-    SELECT 'PROCEDURE', s.name + '.' + p.name FROM sys.procedures p JOIN sys.schemas s ON p.schema_id = s.schema_id WHERE p.is_ms_shipped = 0
-    UNION ALL
-    SELECT 'TRIGGER', s.name + '.' + tr.name FROM sys.triggers tr JOIN sys.tables t ON tr.parent_id = t.object_id JOIN sys.schemas s ON t.schema_id = s.schema_id WHERE tr.is_ms_shipped = 0;
-    """
-    for row in _query_live_rows(conn_info, extra_sql):
-        if len(row) >= 2:
-            warnings.append(f"{row[0]} '{row[1]}' detectada na origem (migração manual necessária).")
+    # 6. Views, Functions, Procedures e Triggers
+    routines = []
+    if include_routines:
+        routines = extract_routines_from_live_db(conn_info)
+    else:
+        extra_sql = """
+        SELECT 'VIEW', s.name + '.' + v.name FROM sys.views v JOIN sys.schemas s ON v.schema_id = s.schema_id WHERE v.is_ms_shipped = 0
+        UNION ALL
+        SELECT 'PROCEDURE', s.name + '.' + p.name FROM sys.procedures p JOIN sys.schemas s ON p.schema_id = s.schema_id WHERE p.is_ms_shipped = 0
+        UNION ALL
+        SELECT 'TRIGGER', s.name + '.' + tr.name FROM sys.triggers tr JOIN sys.tables t ON tr.parent_id = t.object_id JOIN sys.schemas s ON t.schema_id = s.schema_id WHERE tr.is_ms_shipped = 0;
+        """
+        for row in _query_live_rows(conn_info, extra_sql):
+            if len(row) >= 2:
+                warnings.append(f"{row[0]} '{row[1]}' detectada na origem (migração manual necessária).")
 
     return DatabaseSchema(
         schemas=sorted(schemas_set),
         tables=list(tables_map.values()),
         warnings=warnings,
+        routines=routines,
     )
 
 
@@ -677,7 +756,36 @@ def _parse_col_list(raw_cols):
     return cols
 
 
-def extract_schema_from_sql(sql_text):
+def extract_routines_from_sql(sql_text):
+    """Extrai blocos completos de VIEW, FUNCTION, PROCEDURE e TRIGGER de um script T-SQL."""
+    routines = []
+    # Divide por lotes GO (padrão SSMS/sqlpackage)
+    batches = re.split(r"(?im)^\s*GO\s*;?\s*$", sql_text)
+    header_pat = re.compile(
+        r"(?is)\bCREATE\s+(?:OR\s+ALTER\s+)?(VIEW|FUNCTION|PROC(?:EDURE)?|TRIGGER)\s+([^\s(]+)"
+    )
+    for batch in batches:
+        chunk = batch.strip()
+        if not chunk:
+            continue
+        m = header_pat.search(chunk)
+        if not m:
+            continue
+        raw_kind = m.group(1).upper()
+        kind = "PROCEDURE" if raw_kind.startswith("PROC") else raw_kind
+        sch, name = _parse_qualified_name(m.group(2))
+        routines.append(
+            mssql_tsql_transpiler.RoutineDef(
+                kind=kind,
+                schema=sch,
+                name=name,
+                definition=chunk[m.start():].strip(),
+            )
+        )
+    return routines
+
+
+def extract_schema_from_sql(sql_text, include_routines=False):
     """Faz parsing de um script T-SQL DDL para DatabaseSchema."""
     # Remove comentários /* ... */ e -- ...
     cleaned = re.sub(r"/\*.*?\*/", " ", sql_text, flags=re.DOTALL)
@@ -688,16 +796,18 @@ def extract_schema_from_sql(sql_text):
     schemas = []
     tables_map = {}
     warnings = []
+    routines = extract_routines_from_sql(sql_text) if include_routines else []
 
-    # Detecta Views / Procedures / Triggers para avisos TODO
-    for kind, pattern in (
-        ("VIEW", r"(?is)\bCREATE\s+(?:OR\s+ALTER\s+)?VIEW\s+([^\s(]+)"),
-        ("PROCEDURE", r"(?is)\bCREATE\s+(?:OR\s+ALTER\s+)?PROC(?:EDURE)?\s+([^\s(]+)"),
-        ("TRIGGER", r"(?is)\bCREATE\s+(?:OR\s+ALTER\s+)?TRIGGER\s+([^\s(]+)"),
-    ):
-        for m in re.finditer(pattern, cleaned):
-            sch, obj = _parse_qualified_name(m.group(1))
-            warnings.append(f"{kind} '{sch}.{obj}' detectada no script (migração manual necessária).")
+    if not include_routines:
+        # Detecta Views / Procedures / Triggers para avisos TODO
+        for kind, pattern in (
+            ("VIEW", r"(?is)\bCREATE\s+(?:OR\s+ALTER\s+)?VIEW\s+([^\s(]+)"),
+            ("PROCEDURE", r"(?is)\bCREATE\s+(?:OR\s+ALTER\s+)?PROC(?:EDURE)?\s+([^\s(]+)"),
+            ("TRIGGER", r"(?is)\bCREATE\s+(?:OR\s+ALTER\s+)?TRIGGER\s+([^\s(]+)"),
+        ):
+            for m in re.finditer(pattern, cleaned):
+                sch, obj = _parse_qualified_name(m.group(1))
+                warnings.append(f"{kind} '{sch}.{obj}' detectada no script (migração manual necessária).")
 
     for m in re.finditer(r"(?is)\bCREATE\s+SCHEMA\s+([^\s;]+)", cleaned):
         schemas.append(strip_identifier_quotes(m.group(1)))
@@ -857,10 +967,10 @@ def extract_schema_from_sql(sql_text):
                 )
             )
 
-    return DatabaseSchema(schemas=schemas, tables=list(tables_map.values()), warnings=warnings)
+    return DatabaseSchema(schemas=schemas, tables=list(tables_map.values()), warnings=warnings, routines=routines)
 
 
-def extract_schema_from_file(file_path):
+def extract_schema_from_file(file_path, include_routines=False):
     """Carrega e extrai o DatabaseSchema de um arquivo .sql ou .bacpac."""
     path = Path(file_path)
     if not path.exists():
@@ -872,10 +982,10 @@ def extract_schema_from_file(file_path):
             if not sql_candidates:
                 raise ValueError("O arquivo .bacpac não contém 'model.sql'. Exporte um script .sql ou conecte diretamente no banco.")
             sql_text = zf.read(sql_candidates[0]).decode("utf-8", errors="ignore")
-        return extract_schema_from_sql(sql_text)
+        return extract_schema_from_sql(sql_text, include_routines=include_routines)
 
     sql_text = path.read_text(encoding="utf-8", errors="ignore")
-    return extract_schema_from_sql(sql_text)
+    return extract_schema_from_sql(sql_text, include_routines=include_routines)
 
 
 def apply_ddl_to_postgres(ddl_file, pg_conn):
@@ -923,6 +1033,36 @@ def convert_ddl(db_schema, output_path, naming="lowercase"):
     return out_file, warnings
 
 
+def _default_routines_path(ddl_output_path):
+    """Deriva o caminho padrão do arquivo de rotinas a partir do arquivo DDL principal."""
+    p = Path(ddl_output_path)
+    return str(p.with_name(f"{p.stem}_routines{p.suffix or '.sql'}"))
+
+
+def convert_routines(db_schema, output_path, naming="lowercase"):
+    """Converte e salva Views, Functions, Procedures e Triggers em arquivo separado."""
+    routines_sql, warnings = mssql_tsql_transpiler.generate_routines_sql(db_schema.routines, naming=naming)
+    out_file = Path(output_path)
+    out_file.parent.mkdir(parents=True, exist_ok=True)
+    out_file.write_text(routines_sql, encoding="utf-8")
+
+    print("\n" + "=" * 60)
+    print("[SUCCESS] CONVERSÃO DE ROTINAS CONCLUÍDA!")
+    print("=" * 60)
+    print(f"  Rotinas convertidas: {len(db_schema.routines)}")
+    print(f"  Avisos (REVISAR):    {len(warnings)}")
+    print(f"  Arquivo gerado:      {out_file.resolve()}")
+    print("=" * 60)
+    if warnings:
+        print("\n[AVISO] Itens para revisão manual nas rotinas:")
+        for w in warnings[:10]:
+            print(f"  - {w}")
+        if len(warnings) > 10:
+            print(f"  ... e mais {len(warnings) - 10} aviso(s) no arquivo.")
+    print()
+    return out_file, warnings
+
+
 def run_interactive():
     """Fluxo interativo de conversão DDL SQL Server / Azure SQL -> PostgreSQL."""
     print("\n" + "=" * 60)
@@ -939,16 +1079,19 @@ def run_interactive():
         print("\n[INFO] Operação cancelada.")
         return False
 
+    conv_routines_opt = input("\nDeseja converter também Views, Functions, Procedures e Triggers? (s/N): ").strip().lower()
+    include_routines = conv_routines_opt in ("s", "sim", "y", "yes")
+
     if src_choice == "2":
         file_path = input("Path do arquivo .sql ou .bacpac: ").strip()
         while not file_path:
             print("[ERRO] O caminho do arquivo é obrigatório.")
             file_path = input("Path do arquivo .sql ou .bacpac: ").strip()
-        db_schema = extract_schema_from_file(file_path)
+        db_schema = extract_schema_from_file(file_path, include_routines=include_routines)
     else:
         conn_info = mssql_backup_restore.prompt_connection_details("source")
         print("\n[INFO] Extraindo metadados DDL do servidor...")
-        db_schema = extract_schema_from_live_db(conn_info)
+        db_schema = extract_schema_from_live_db(conn_info, include_routines=include_routines)
 
     print("\nEstratégia de nomenclatura no PostgreSQL:")
     print("  1. lowercase  (padrão - sem aspas, ex: useraccounts)")
@@ -960,6 +1103,11 @@ def run_interactive():
 
     output_path = input("\nPath para salvar o script PostgreSQL (padrão: ./schema_pg.sql): ").strip() or "./schema_pg.sql"
     out_file, _ = convert_ddl(db_schema, output_path, naming=naming)
+
+    if include_routines:
+        default_r_path = _default_routines_path(output_path)
+        r_output = input(f"Path para salvar rotinas convertidas (padrão: {default_r_path}): ").strip() or default_r_path
+        convert_routines(db_schema, r_output, naming=naming)
 
     apply_opt = input("Deseja aplicar a DDL convertida agora em um banco PostgreSQL? (s/N): ").strip().lower()
     if apply_opt in ("s", "sim", "y", "yes"):
@@ -986,6 +1134,8 @@ def main():
     parser.add_argument("--source-ssl", choices=["require", "trust", "disable"], default=None)
 
     parser.add_argument("--output", default="./schema_pg.sql", help="Arquivo .sql de saída (padrão: ./schema_pg.sql)")
+    parser.add_argument("--convert-routines", action="store_true", help="Converte também Views, Functions, Procedures e Triggers para arquivo separado")
+    parser.add_argument("--routines-output", default=None, help="Arquivo .sql de saída das rotinas (padrão: <output>_routines.sql)")
     parser.add_argument("--naming", choices=["lowercase", "snake_case", "preserve"], default="lowercase")
 
     parser.add_argument("--apply", action="store_true", help="Aplica a DDL gerada no PostgreSQL alvo via psql")
@@ -999,7 +1149,7 @@ def main():
     args = parser.parse_args()
 
     if args.source_file:
-        db_schema = extract_schema_from_file(args.source_file)
+        db_schema = extract_schema_from_file(args.source_file, include_routines=args.convert_routines)
     else:
         if not args.source_db:
             parser.error("Informe --source-file ou --source-db para extração live.")
@@ -1015,9 +1165,13 @@ def main():
             "password": pwd,
             "ssl_mode": args.source_ssl or ("require" if is_az else "trust"),
         }
-        db_schema = extract_schema_from_live_db(conn_info)
+        db_schema = extract_schema_from_live_db(conn_info, include_routines=args.convert_routines)
 
     out_file, _ = convert_ddl(db_schema, args.output, naming=args.naming)
+
+    if args.convert_routines:
+        r_out = args.routines_output or _default_routines_path(args.output)
+        convert_routines(db_schema, r_out, naming=args.naming)
 
     if args.apply:
         if args.pg_db:
