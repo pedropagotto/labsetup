@@ -15,6 +15,7 @@ import pg_backup_restore
 import mssql_backup_restore
 import mssql_install
 import mssql_to_pg_ddl
+import mssql_tsql_transpiler
 
 
 class TestPgBackupRestore(unittest.TestCase):
@@ -514,6 +515,93 @@ class TestMssqlToPgDdl(unittest.TestCase):
         finally:
             if os.path.exists(tmp_path):
                 os.unlink(tmp_path)
+
+
+class TestMssqlTsqlTranspiler(unittest.TestCase):
+
+    def test_transpile_expressions(self):
+        expr = "SELECT TOP 5 ISNULL([Name], N'Anon'), GETDATE(), NEWID(), LEN([Name]) FROM [dbo].[Users] WITH (NOLOCK)"
+        pg = mssql_tsql_transpiler.transpile_tsql_expressions(expr, naming="snake_case")
+        self.assertIn("COALESCE(name, 'Anon')", pg)
+        self.assertIn("CURRENT_TIMESTAMP", pg)
+        self.assertIn("gen_random_uuid()", pg)
+        self.assertIn("LENGTH(name)", pg)
+        self.assertIn("FROM public.users", pg)
+        self.assertIn("LIMIT 5", pg)
+        self.assertNotIn("NOLOCK", pg)
+
+    def test_convert_view_to_pg(self):
+        r = mssql_tsql_transpiler.RoutineDef(
+            kind="VIEW",
+            schema="dbo",
+            name="vwActiveUsers",
+            definition="CREATE VIEW [dbo].[vwActiveUsers] AS SELECT [Id], ISNULL([Name], N'') AS [DisplayName] FROM [dbo].[Users] WITH (NOLOCK);",
+        )
+        sql, warns = mssql_tsql_transpiler.convert_view_to_pg(r, naming="snake_case")
+        self.assertEqual(warns, [])
+        self.assertIn("CREATE OR REPLACE VIEW public.vw_active_users AS", sql)
+        self.assertIn("COALESCE(name, '') AS display_name", sql)
+
+    def test_convert_scalar_function_to_pg(self):
+        r = mssql_tsql_transpiler.RoutineDef(
+            kind="FUNCTION",
+            schema="dbo",
+            name="fnAddDays",
+            definition="CREATE FUNCTION [dbo].[fnAddDays](@dt DATETIME2, @days INT) RETURNS DATETIME2 AS BEGIN RETURN DATEADD(day, @days, @dt); END;",
+        )
+        sql, warns = mssql_tsql_transpiler.convert_function_to_pg(r, naming="lowercase")
+        self.assertEqual(warns, [])
+        self.assertIn("CREATE OR REPLACE FUNCTION public.fnadddays(p_dt TIMESTAMP, p_days INTEGER)", sql)
+        self.assertIn("RETURNS TIMESTAMP", sql)
+        self.assertIn("INTERVAL '1 day'", sql)
+
+    def test_convert_procedure_with_declare_set_and_select_warning(self):
+        r = mssql_tsql_transpiler.RoutineDef(
+            kind="PROCEDURE",
+            schema="dbo",
+            name="uspGetUser",
+            definition=(
+                "CREATE PROCEDURE [dbo].[uspGetUser] (@UserId INT, @Total INT OUTPUT) AS "
+                "BEGIN SET NOCOUNT ON; DECLARE @Prefix NVARCHAR(10) = N'USR'; "
+                "SET @Total = 1; SELECT [Id], [Email] FROM [dbo].[Users] WHERE [Id] = @UserId; END;"
+            ),
+        )
+        sql, warns = mssql_tsql_transpiler.convert_procedure_to_pg(r, naming="snake_case")
+        self.assertIn("CREATE OR REPLACE PROCEDURE public.usp_get_user(p_user_id INTEGER, INOUT p_total INTEGER)", sql)
+        self.assertIn("v_prefix VARCHAR(10) := 'USR';", sql)
+        self.assertIn("p_total := 1;", sql)
+        self.assertTrue(any("resultset" in w for w in warns))
+
+    def test_convert_trigger_to_pg(self):
+        r = mssql_tsql_transpiler.RoutineDef(
+            kind="TRIGGER",
+            schema="dbo",
+            name="trgUsersAudit",
+            definition=(
+                "CREATE TRIGGER [dbo].[trgUsersAudit] ON [dbo].[Users] AFTER INSERT, UPDATE AS "
+                "BEGIN INSERT INTO [dbo].[AuditLog] ([Action]) VALUES (N'CHANGE'); END;"
+            ),
+        )
+        sql, _ = mssql_tsql_transpiler.convert_trigger_to_pg(r, naming="lowercase")
+        self.assertIn("CREATE OR REPLACE FUNCTION public.trg_fn_trgusersaudit()", sql)
+        self.assertIn("RETURNS TRIGGER", sql)
+        self.assertIn("CREATE TRIGGER trgusersaudit", sql)
+        self.assertIn("AFTER INSERT OR UPDATE ON public.users", sql)
+        self.assertIn("EXECUTE FUNCTION public.trg_fn_trgusersaudit();", sql)
+
+    def test_extract_routines_from_sql_and_order(self):
+        tsql = """
+        CREATE TRIGGER [dbo].[trgA] ON [dbo].[T] AFTER INSERT AS BEGIN PRINT N'ok'; END;
+        GO
+        CREATE VIEW [dbo].[vA] AS SELECT [Id] FROM [dbo].[T];
+        GO
+        CREATE PROCEDURE [dbo].[pA] AS BEGIN SET NOCOUNT ON; END;
+        """
+        schema = mssql_to_pg_ddl.extract_schema_from_sql(tsql, include_routines=True)
+        self.assertEqual(len(schema.routines), 3)
+        routines_sql, _ = mssql_tsql_transpiler.generate_routines_sql(schema.routines, naming="lowercase")
+        self.assertLess(routines_sql.index("CREATE OR REPLACE VIEW"), routines_sql.index("CREATE OR REPLACE PROCEDURE"))
+        self.assertLess(routines_sql.index("CREATE OR REPLACE PROCEDURE"), routines_sql.index("CREATE TRIGGER"))
 
 
 if __name__ == "__main__":

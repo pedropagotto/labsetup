@@ -56,7 +56,7 @@ Para facilitar a automação em servidores limpos (bare-metal ou VPS), você pod
 - `--postgres` / `--install-postgres` : Executa diretamente o instalador do PostgreSQL.
 - `--mssql` / `--install-mssql` : Executa diretamente o instalador do SQL Server.
 - `--mssql-backup-restore` : Executa diretamente a ferramenta de Backup/Restore e Usuários para SQL Server / Azure SQL.
-- `--mssql-to-pg-ddl` : Converte estruturas DDL de SQL Server / Azure SQL para PostgreSQL (`mssql_to_pg_ddl.py`).
+- `--mssql-to-pg-ddl` : Converte estruturas DDL de SQL Server / Azure SQL para PostgreSQL (`mssql_to_pg_ddl.py`). Use `--convert-routines` para transpilar também Views, Functions, Procedures e Triggers para `*_routines.sql`.
 - `--mssql-reset-passwords` : Executa o reset local da senha `sa` do SQL Server via `mssql-conf`.
 - `--docker` / `--install-docker` : Executa diretamente o instalador do Docker.
 - `--kamal` / `--install-kamal` : Executa diretamente o instalador do Kamal.
