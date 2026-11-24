@@ -18,6 +18,9 @@ def filter_args(args):
     control_args = {
         "--all", "--install-all", "-aio",
         "--postgres", "--install-postgres",
+        "--mssql", "--install-mssql",
+        "--mssql-backup-restore",
+        "--mssql-reset-passwords", "--mssql-reset-password",
         "--docker", "--install-docker",
         "--kamal", "--install-kamal",
         "--portainer", "--install-portainer",
@@ -39,8 +42,129 @@ def print_menu():
     print("  4. Instalar Portainer CE (Debian/Ubuntu)")
     print("  5. Instalação Completa All-in-One (PostgreSQL + Docker + Kamal + Portainer)")
     print("  6. Configurar SSL Let's Encrypt no Kamal (Compartilhável)")
+    print("  7. Gerenciamento & Operações SQL Server / Azure SQL (Backup, Restore, Usuários, Instalação)")
     print("  0. Sair")
     print("=" * 60)
+
+
+def print_mssql_menu():
+    """Exibe o submenu de operações do SQL Server e Azure SQL."""
+    print("\n" + "=" * 60)
+    print("OPERAÇÕES E GERENCIAMENTO SQL SERVER / AZURE SQL")
+    print("=" * 60)
+    print("  1. Backup / Restore de Banco de Dados (.bacpac / .bak)")
+    print("  2. Criar Novo Usuário (Owner, Readonly, Writer)")
+    print("  3. Redefinir Senha de Usuário (Remoto / Azure SQL / SQL Server)")
+    print("  4. Instalar SQL Server Pronto para Produção (Ubuntu / Docker)")
+    print("  5. Resetar Senha Local do 'sa' (via mssql-conf)")
+    print("  0. Voltar ao Menu Principal")
+    print("=" * 60)
+
+
+def run_mssql_submenu():
+    """Gerencia o submenu interativo de SQL Server e Azure SQL."""
+    actions = {
+        "1": run_mssql_backup_restore,
+        "2": run_mssql_create_user,
+        "3": run_mssql_reset_user_password,
+        "4": run_mssql_install,
+        "5": run_mssql_reset_passwords,
+    }
+    while True:
+        print_mssql_menu()
+        try:
+            choice = input("Digite sua escolha [0-5]: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print("\nVoltando ao menu principal...")
+            break
+
+        if choice == "0":
+            break
+        action = actions.get(choice)
+        if action:
+            action()
+        else:
+            print("[ERRO] Opção inválida. Tente novamente.")
+
+
+def run_mssql_backup_restore(extra_args=None):
+    """Executa a ferramenta de Backup/Restore para SQL Server e Azure SQL."""
+    script_path = Path(__file__).parent / "mssql_backup_restore.py"
+    if not script_path.exists():
+        print("[ERRO] mssql_backup_restore.py não encontrado!")
+        return False
+
+    print("\n[INFO] Iniciando ferramenta de Backup/Restore SQL Server / Azure SQL...")
+    args = extra_args if extra_args is not None else sys.argv[1:]
+    cmd = [sys.executable, str(script_path)] + filter_args(args)
+    try:
+        subprocess.run(cmd, check=False)
+        return True
+    except KeyboardInterrupt:
+        print("\n[INFO] Operação interrompida pelo usuário.")
+        return False
+
+
+def run_mssql_create_user(extra_args=None):
+    """Executa a criação de usuários no SQL Server ou Azure SQL."""
+    script_path = Path(__file__).parent / "mssql_backup_restore.py"
+    if not script_path.exists():
+        print("[ERRO] mssql_backup_restore.py não encontrado!")
+        return False
+
+    print("\n[INFO] Iniciando criação de usuário SQL Server / Azure SQL...\n")
+    import mssql_backup_restore
+    return mssql_backup_restore.create_mssql_user()
+
+
+def run_mssql_reset_user_password(extra_args=None):
+    """Executa a redefinição remota de senha no SQL Server ou Azure SQL."""
+    script_path = Path(__file__).parent / "mssql_backup_restore.py"
+    if not script_path.exists():
+        print("[ERRO] mssql_backup_restore.py não encontrado!")
+        return False
+
+    print("\n[INFO] Iniciando redefinição de senha SQL Server / Azure SQL...\n")
+    import mssql_backup_restore
+    return mssql_backup_restore.reset_mssql_user_password()
+
+
+def run_mssql_install(extra_args=None):
+    """Executa o script de instalação do SQL Server."""
+    script_path = Path(__file__).parent / "mssql_install.py"
+    if not script_path.exists():
+        print("[ERRO] mssql_install.py não encontrado!")
+        return False
+
+    print("\n[INFO] Iniciando instalador do SQL Server...")
+    print("[AVISO] Esta operação geralmente requer sudo/root (ou --docker).\n")
+    args = extra_args if extra_args is not None else sys.argv[1:]
+    cmd = [sys.executable, str(script_path)] + filter_args(args)
+    try:
+        proc = subprocess.run(cmd, check=False)
+        return proc.returncode == 0
+    except KeyboardInterrupt:
+        print("\n[INFO] Operação interrompida pelo usuário.")
+        return False
+
+
+def run_mssql_reset_passwords(extra_args=None):
+    """Executa o reset local da senha do administrador 'sa' via mssql-conf."""
+    script_path = Path(__file__).parent / "mssql_install.py"
+    if not script_path.exists():
+        print("[ERRO] mssql_install.py não encontrado!")
+        return False
+
+    print("\n[INFO] Iniciando reset local da senha 'sa' do SQL Server...")
+    print("[AVISO] Esta operação requer sudo/root.\n")
+    args = extra_args if extra_args is not None else sys.argv[1:]
+    cmd = [sys.executable, str(script_path), "--reset-passwords"] + filter_args(args)
+    try:
+        proc = subprocess.run(cmd, check=False)
+        return proc.returncode == 0
+    except KeyboardInterrupt:
+        print("\n[INFO] Operação interrompida pelo usuário.")
+        return False
 
 
 def print_postgres_menu():
@@ -346,31 +470,40 @@ def main():
             # Repassa tudo para o backup_restore
             run_backup_restore(sys.argv[1:])
             return
+        elif first_arg in ("--install-mssql", "--mssql"):
+            run_mssql_install(sys.argv[2:])
+            return
+        elif first_arg in ("--mssql-reset-passwords", "--mssql-reset-password"):
+            run_mssql_reset_passwords(sys.argv[2:])
+            return
+        elif first_arg == "--mssql-backup-restore":
+            run_mssql_backup_restore(sys.argv[2:])
+            return
 
     # Caso contrário, exibe o menu interativo
+    menu_actions = {
+        "1": run_postgres_submenu,
+        "2": run_docker_install,
+        "3": run_kamal_install,
+        "4": run_portainer_install,
+        "5": run_all_in_one,
+        "6": run_kamal_ssl_config,
+        "7": run_mssql_submenu,
+    }
     while True:
         print_menu()
         try:
-            choice = input("Digite sua escolha [0-6]: ").strip()
+            choice = input("Digite sua escolha [0-7]: ").strip()
         except (EOFError, KeyboardInterrupt):
             print("\nSaindo...")
             break
 
-        if choice == "1":
-            run_postgres_submenu()
-        elif choice == "2":
-            run_docker_install()
-        elif choice == "3":
-            run_kamal_install()
-        elif choice == "4":
-            run_portainer_install()
-        elif choice == "5":
-            run_all_in_one()
-        elif choice == "6":
-            run_kamal_ssl_config()
-        elif choice == "0":
+        if choice == "0":
             print("Saindo da ferramenta principal. Até logo!")
             break
+        action = menu_actions.get(choice)
+        if action:
+            action()
         else:
             print("[ERRO] Opção inválida. Tente novamente.")
 

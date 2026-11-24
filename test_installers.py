@@ -12,6 +12,8 @@ import portainer_install
 import pg_main
 import kamal_ssl_config
 import pg_backup_restore
+import mssql_backup_restore
+import mssql_install
 
 
 class TestPgBackupRestore(unittest.TestCase):
@@ -291,6 +293,150 @@ class TestPgMainIntegration(unittest.TestCase):
         args = ["--kamal-ssl", "--config-kamal-ssl", "--some-other-arg"]
         filtered = pg_main.filter_args(args)
         self.assertEqual(filtered, ["--some-other-arg"])
+
+    def test_filter_args_mssql(self):
+        args = ["--mssql", "--install-mssql", "--mssql-backup-restore", "--mssql-reset-passwords", "--docker"]
+        filtered = pg_main.filter_args(args)
+        self.assertEqual(filtered, [])
+
+
+class TestMssqlBackupRestore(unittest.TestCase):
+
+    def test_is_azure_sql_host(self):
+        self.assertTrue(mssql_backup_restore.is_azure_sql_host("myserver.database.windows.net"))
+        self.assertFalse(mssql_backup_restore.is_azure_sql_host("localhost"))
+
+    def test_generate_random_password_complexity(self):
+        pwd = mssql_backup_restore.generate_random_password(16)
+        self.assertEqual(len(pwd), 16)
+        self.assertTrue(any(c.isupper() for c in pwd))
+        self.assertTrue(any(c.islower() for c in pwd))
+        self.assertTrue(any(c.isdigit() for c in pwd))
+        self.assertTrue(any(c in "!@#$%^&*" for c in pwd))
+
+    @patch("getpass.getpass", return_value="AzurePass123!")
+    @patch("builtins.input")
+    def test_prompt_connection_details_azure(self, mock_input, mock_getpass):
+        mock_input.side_effect = ["myserver.database.windows.net", "1433", "appdb", "sqladmin", "1"]
+        conn = mssql_backup_restore.prompt_connection_details("source")
+        self.assertTrue(conn["is_azure"])
+        self.assertEqual(conn["port"], 1433)
+        self.assertEqual(conn["ssl_mode"], "require")
+        self.assertEqual(conn["database"], "appdb")
+
+    @patch("mssql_backup_restore.run_sqlpackage")
+    def test_do_backup_bacpac(self, mock_run_sqlpackage):
+        args = MagicMock()
+        args.source = {
+            "type": "local",
+            "is_azure": True,
+            "host": "myserver.database.windows.net",
+            "port": 1433,
+            "database": "appdb",
+            "user": "sqladmin",
+            "password": "secret",
+            "ssl_mode": "require",
+        }
+        args.backup_file = "/tmp/test_mssql.bacpac"
+        args.format = "bacpac"
+
+        mssql_backup_restore.do_backup(args)
+        mock_run_sqlpackage.assert_called_once()
+        call_args = mock_run_sqlpackage.call_args[0][0]
+        self.assertEqual(call_args[0], "/Action:Export")
+        self.assertIn("Encrypt=True", call_args[1])
+        self.assertIn("TrustServerCertificate=False", call_args[1])
+
+    @patch("mssql_backup_restore.run_sqlpackage")
+    def test_do_restore_bacpac(self, mock_run_sqlpackage):
+        args = MagicMock()
+        args.target = {
+            "type": "local",
+            "is_azure": False,
+            "host": "localhost",
+            "port": 1433,
+            "database": "appdb",
+            "user": "sa",
+            "password": "secret",
+            "ssl_mode": "trust",
+        }
+        args.backup_file = "/tmp/test_mssql.bacpac"
+        args.format = "bacpac"
+
+        mssql_backup_restore.do_restore(args)
+        mock_run_sqlpackage.assert_called_once()
+        call_args = mock_run_sqlpackage.call_args[0][0]
+        self.assertEqual(call_args[0], "/Action:Import")
+        self.assertIn("TrustServerCertificate=True", call_args[1])
+
+    def test_do_backup_bak_rejects_azure(self):
+        args = MagicMock()
+        args.source = {
+            "type": "local",
+            "is_azure": True,
+            "host": "myserver.database.windows.net",
+            "port": 1433,
+            "database": "appdb",
+            "user": "sqladmin",
+            "password": "secret",
+            "ssl_mode": "require",
+        }
+        args.backup_file = "/tmp/test.bak"
+        args.format = "bak"
+
+        with self.assertRaises(ValueError):
+            mssql_backup_restore.do_backup(args)
+
+    @patch("mssql_backup_restore.run_sqlcmd")
+    @patch("getpass.getpass", return_value="AdminPass123!")
+    @patch("builtins.input")
+    def test_create_mssql_user_azure_contained(self, mock_input, mock_getpass, mock_run_sqlcmd):
+        mock_input.side_effect = [
+            "myserver.database.windows.net", "1433", "sqladmin", "1", "appdb", "reader_app", "2"
+        ]
+        success = mssql_backup_restore.create_mssql_user()
+        self.assertTrue(success)
+        self.assertEqual(mock_run_sqlcmd.call_count, 2)
+
+    @patch("mssql_backup_restore.run_sqlcmd")
+    @patch("getpass.getpass", return_value="AdminPass123!")
+    @patch("builtins.input")
+    def test_create_mssql_user_sqlserver_login(self, mock_input, mock_getpass, mock_run_sqlcmd):
+        mock_input.side_effect = [
+            "localhost", "1433", "1", "sa", "2", "appdb", "writer_app", "3"
+        ]
+        success = mssql_backup_restore.create_mssql_user()
+        self.assertTrue(success)
+        # 1: CREATE LOGIN (master), 2: CREATE USER (appdb), 3: ALTER ROLE (appdb)
+        self.assertEqual(mock_run_sqlcmd.call_count, 3)
+
+    @patch("mssql_backup_restore.run_sqlcmd")
+    @patch("getpass.getpass", return_value="AdminPass123!")
+    @patch("builtins.input")
+    def test_reset_mssql_user_password_sqlserver(self, mock_input, mock_getpass, mock_run_sqlcmd):
+        mock_input.side_effect = [
+            "localhost", "1433", "1", "sa", "2", "app_user", "1"
+        ]
+        success = mssql_backup_restore.reset_mssql_user_password()
+        self.assertTrue(success)
+        mock_run_sqlcmd.assert_called_once()
+
+
+class TestMssqlInstall(unittest.TestCase):
+
+    @patch("shutil.which", return_value="/usr/bin/docker")
+    @patch("mssql_install.configure_firewall")
+    @patch("mssql_install.time.sleep")
+    @patch("mssql_install.run_cmd")
+    @patch("subprocess.run")
+    def test_install_mssql_docker(self, mock_sub_run, mock_run_cmd, mock_sleep, mock_fw, mock_which):
+        mssql_install.install_mssql_docker("StrongPass123!", container_name="mssql_test")
+        mock_run_cmd.assert_any_call(["docker", "volume", "create", "mssql_data"])
+        mock_fw.assert_called_once()
+
+    @patch("os.geteuid", return_value=1000)
+    def test_reset_sa_password_requires_root(self, mock_euid):
+        self.assertFalse(mssql_install.reset_sa_password_local("StrongPass123!"))
 
 
 if __name__ == "__main__":
