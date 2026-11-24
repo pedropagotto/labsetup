@@ -1,6 +1,6 @@
 .DEFAULT_GOAL := start
 
-.PHONY: start help install-postgres install-mssql install-docker install-kamal install-portainer config-kamal-ssl install-all backup-restore mssql-backup-restore test
+.PHONY: start help install-postgres install-mssql install-docker install-kamal install-portainer config-kamal-ssl install-all backup-restore mssql-backup-restore mssql-to-pg-ddl test
 
 start:
 	python3 pg_main.py
@@ -18,6 +18,7 @@ help:
 	@echo "make install-all           - Executa o instalador completo All-in-One (PostgreSQL + Docker + Kamal + Portainer)"
 	@echo "make backup-restore        - Executa a ferramenta de Backup/Restore PostgreSQL"
 	@echo "make mssql-backup-restore  - Executa a ferramenta de Backup/Restore SQL Server / Azure SQL"
+	@echo "make mssql-to-pg-ddl       - Converte estruturas DDL (SQL Server / Azure SQL -> PostgreSQL)"
 	@echo "make test                  - Executa os testes automatizados do projeto"
 
 install-postgres:
@@ -46,6 +47,9 @@ backup-restore:
 
 mssql-backup-restore:
 	python3 pg_main.py --mssql-backup-restore
+
+mssql-to-pg-ddl:
+	python3 pg_main.py --mssql-to-pg-ddl
 
 test:
 	python3 test_installers.py

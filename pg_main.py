@@ -20,6 +20,7 @@ def filter_args(args):
         "--postgres", "--install-postgres",
         "--mssql", "--install-mssql",
         "--mssql-backup-restore",
+        "--mssql-to-pg-ddl",
         "--mssql-reset-passwords", "--mssql-reset-password",
         "--docker", "--install-docker",
         "--kamal", "--install-kamal",
@@ -57,6 +58,7 @@ def print_mssql_menu():
     print("  3. Redefinir Senha de Usuário (Remoto / Azure SQL / SQL Server)")
     print("  4. Instalar SQL Server Pronto para Produção (Ubuntu / Docker)")
     print("  5. Resetar Senha Local do 'sa' (via mssql-conf)")
+    print("  6. Converter Estrutura DDL (SQL Server / Azure SQL -> PostgreSQL)")
     print("  0. Voltar ao Menu Principal")
     print("=" * 60)
 
@@ -69,11 +71,12 @@ def run_mssql_submenu():
         "3": run_mssql_reset_user_password,
         "4": run_mssql_install,
         "5": run_mssql_reset_passwords,
+        "6": run_mssql_to_pg_ddl,
     }
     while True:
         print_mssql_menu()
         try:
-            choice = input("Digite sua escolha [0-5]: ").strip()
+            choice = input("Digite sua escolha [0-6]: ").strip()
         except (EOFError, KeyboardInterrupt):
             print("\nVoltando ao menu principal...")
             break
@@ -159,6 +162,24 @@ def run_mssql_reset_passwords(extra_args=None):
     print("[AVISO] Esta operação requer sudo/root.\n")
     args = extra_args if extra_args is not None else sys.argv[1:]
     cmd = [sys.executable, str(script_path), "--reset-passwords"] + filter_args(args)
+    try:
+        proc = subprocess.run(cmd, check=False)
+        return proc.returncode == 0
+    except KeyboardInterrupt:
+        print("\n[INFO] Operação interrompida pelo usuário.")
+        return False
+
+
+def run_mssql_to_pg_ddl(extra_args=None):
+    """Executa o conversor de estruturas DDL (SQL Server / Azure SQL -> PostgreSQL)."""
+    script_path = Path(__file__).parent / "mssql_to_pg_ddl.py"
+    if not script_path.exists():
+        print("[ERRO] mssql_to_pg_ddl.py não encontrado!")
+        return False
+
+    print("\n[INFO] Iniciando conversor de DDL (SQL Server / Azure SQL -> PostgreSQL)...")
+    args = extra_args if extra_args is not None else sys.argv[1:]
+    cmd = [sys.executable, str(script_path)] + filter_args(args)
     try:
         proc = subprocess.run(cmd, check=False)
         return proc.returncode == 0
@@ -478,6 +499,9 @@ def main():
             return
         elif first_arg == "--mssql-backup-restore":
             run_mssql_backup_restore(sys.argv[2:])
+            return
+        elif first_arg == "--mssql-to-pg-ddl":
+            run_mssql_to_pg_ddl(sys.argv[2:])
             return
 
     # Caso contrário, exibe o menu interativo
